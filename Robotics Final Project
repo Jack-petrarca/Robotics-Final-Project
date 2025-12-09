@@ -1,142 +1,72 @@
 import rclpy
 import math
-
 from rclpy.node import Node
 
-from geometry_msgs.msg import Twist
-from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import Twist
 
 
-class RobotController(Node):
-
-    
-    def __init__(self):
-        super().__init__('robot_controller')
-
-        
-        self.x = 0.0
-        self.y = 0.0
-        self.z = 0.0
-        self.yaw = 0.0
-
-        self.sc = LaserScan()
-
-        # Goal position
-        self.goal_x = 4.0
-        self.goal_y = 8.0
-
-        # Publishers / Subscribers
-        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 1)
-        self.scan_sub = self.create_subscription(
-            LaserScan, 'scan', self.scan_callback, 1)
-        self.odom_sub = self.create_subscription(
-            Odometry, 'odom', self.odom_callback, 1)
-
-        
-        timer_period = 0.2
-        self.timer = self.create_timer(timer_period, self.control_callback)
-        self.i = 0
-
-    ##########################################
-    ### this function save the scan every time it is received
-    ##########################################
-    def scan_callback(self, msg):
-        self.sc = msg
-
-    ##########################################
-    ### this function save the odometry every time it is received
-    ##########################################
-    def odom_callback(self, msg):
-        # Position
-        self.x = msg.pose.pose.position.x
-        self.y = msg.pose.pose.position.y
-        self.z = msg.pose.pose.position.z
-
-        # Orientation -> yaw (from quaternion)
-        q = msg.pose.pose.orientation
-        # Using the formula your instructor gave
-        self.yaw = self.yaw = math.atan2(
-    2.0 * (q.w * q.z + q.x * q.y),
-    1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-)
-
-        
-
-    ##########################################
-    ### this function is executed 5 times/second, no matter what
-    ##########################################
-    
-    def control_callback(self):
-        # Print current state (for debugging)
-        print(f"x: {self.x:.2f}, y: {self.y:.2f}, z: {self.z:.2f}, yaw: {self.yaw:.2f}")
-
-        msg = Twist()
-
-        # Compute error to goal
-        dx = self.goal_x - self.x
-        dy = self.goal_y - self.y
-
-        distance = math.sqrt(dx * dx + dy * dy)
-
-        
-        angle_to_goal = math.atan2(dy, dx)
-
-    
-        angle_error = angle_to_goal - self.yaw
-        
-        angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
-
-        
-        distance_tolerance = 0.1
-        if distance < distance_tolerance:
-            msg.linear.x = 0.0
-            msg.angular.z = 0.0
-            self.get_logger().info("Goal reached! Stopping.")
-        else:
-            
-            K_lin = 0.5    
-            K_ang = 1.5    
-
-            linear_speed = K_lin * distance
-            angular_speed = K_ang * angle_error
-
-            
-            max_linear = 0.4
-            max_angular = 1.0
-
-            if linear_speed > max_linear:
-                linear_speed = max_linear
-
-            if angular_speed > max_angular:
-                angular_speed = max_angular
-            if angular_speed < -max_angular:
-                angular_speed = -max_angular
-
-            
-            if abs(angle_error) > 0.7:
-                linear_speed *= 0.3
-
-            msg.linear.x = linear_speed
-            msg.angular.z = angular_speed
-
-        # Publish the command
-        self.cmd_vel_pub.publish(msg)
-        self.i += 1
+class hw10Controller(Node):
+	def __init__(self):
+		print('starting node initialization...')
+		super().__init__('myfirstosnode')
+		
+		self.timer_period = 0.1
+		self.b = 0.1
+		self.x = 0
+		self.y = 0
+		self.yaw = 0 
+		
+		self.xd = 4.0 #Kyle
+		self.yd = 6.0 #Ludwig
+		
+		self.kx = 0.1
+		self.ky = 0.1
+		
+		self.cmd_publisher = self.create_publisher(Twist, '/cmd_vel', 0)
+		self.subscription = self.create_subscription(Odometry, '/odom', self.odom_callback, 0)
+		self.control_timer = self.create_timer(self.timer_period, self.control_callback)
+		
+		print('end node initialization')
+		
+	def odom_callback(self, msg):
+		self.x = msg.pose.pose.position.x
+		self.y = msg.pose.pose.position.y
+		self.yaw = math.atan2(2.0*(msg.pose.pose.orientation.w * msg.pose.pose.orientation.z + msg.pose.pose.orientation.x * msg.pose.pose.orientation.y), 1.0-2.0*(msg.pose.pose.orientation.y * msg.pose.pose.orientation.y + msg.pose.pose.orientation.z * msg.pose.pose.orientation.z));
+		
+	def control_callback(self):
+		self.x
+		self.y
+		self.yaw
+		ex = self.xd - self.x
+		ey = self.yd - self.y
+		
+		u1 = self.kx * ex
+		u2 = self.ky * ey
+			
+		v = math.cos(self.yaw)*u1 + math.sin(self.yaw)*u2
+		
+		omega = -math.sin(self.yaw)*u1/self.b + math.cos(self.yaw)*u2/self.b
+		
+		twist_msg = Twist()
+		twist_msg.linear.x = v
+		twist_msg.angular.z = omega
+		self.cmd_publisher.publish(twist_msg)
+		
+		print(self.x, self.y, self.yaw)
+		
 
 
-##########################################
-### this is the main function and is the entry point in this file
-##########################################
 def main(args=None):
-    rclpy.init(args=args)
-    robot_controller = RobotController()
-
-    rclpy.spin(robot_controller)
-
-    robot_controller.destroy_node()
-    rclpy.shutdown()
-
-
+	rclpy.init(args=args)
+	hw10_controller = hw10Controller()
+	
+	rclpy.spin(hw10_controller)
+	
+	hw10_controller.destroy_node()
+	rclpy.shutdown()
+	
 if __name__ == '__main__':
-    main()
+	main() 
+
+
