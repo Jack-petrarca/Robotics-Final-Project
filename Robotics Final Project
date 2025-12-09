@@ -5,6 +5,29 @@ from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 
+	def __init__(self, xmin, xmax, ymin, ymax, res):
+		print('Creating Map')
+		self.xmin = xmin
+		self.xmax = xmax
+		self.ymin = ymin
+		self.ymax = ymax
+		self.res = res
+		self.W = math.ceil((xmax-xmin)/res)
+		self.H = math.ceil((ymax-ymin)/res)
+		self.map = np.full((self.H, self.W), 100, dtype=np.uint8)
+		#self.map[10,15] = 255
+		#cv2.imshow("map", self.map)
+		#cv2.waitKey(50)
+	
+	def map2world(v, u):
+		x = self.res*(v+0.5)+self.xmin
+		y = -self.res*(u+0.5)+self.ymax
+		return x, y
+	
+	def world2map(x, y):
+		v = (x-self.xmin)/self.res
+		u = (self.ymax-y)/self.res
+		return v, u
 
 class hw10Controller(Node):
 	def __init__(self):
