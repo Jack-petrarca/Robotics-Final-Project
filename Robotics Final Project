@@ -25,9 +25,11 @@ from geometry_msgs.msg import Twist
 		return x, y
 	
 	def world2map(x, y):
-		v = (x-self.xmin)/self.res
-		u = (self.ymax-y)/self.res
+		v = np.floor((x-self.xmin)/self.res).astype(int)
+		u = np.floor((self.ymax-y)/self.res).astype(int)
 		return v, u
+
+	def insert_obstacle(self.
 
 class hw10Controller(Node):
 	def __init__(self):
