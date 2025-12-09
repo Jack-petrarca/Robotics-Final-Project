@@ -36,10 +36,12 @@ from geometry_msgs.msg import Twist
 		cv2.imshow("map", self.map)
 		cv2.waitKey(50)
 
-class hw10Controller(Node):
+class Project(Node):
 	def __init__(self):
 		print('starting node initialization...')
 		super().__init__('myfirstosnode')
+		
+		self.map = MyMap(-10, 10, -10, 10, 0.05)
 		
 		self.timer_period = 0.1
 		self.b = 0.1
@@ -54,16 +56,37 @@ class hw10Controller(Node):
 		self.ky = 0.1
 		
 		self.cmd_publisher = self.create_publisher(Twist, '/cmd_vel', 0)
-		self.subscription = self.create_subscription(Odometry, '/odom', self.odom_callback, 0)
+		self.odom_subscription = self.create_subscription(Odometry, '/odom', self.odom_cbk, 0)
+		self.scan_subscription = self.create_subscription(Laserscan, '/scan', self.scan_cbk, 0)
 		self.control_timer = self.create_timer(self.timer_period, self.control_callback)
 		
 		print('end node initialization')
 		
-	def odom_callback(self, msg):
+	def odom_cbk(self, msg):
 		self.x = msg.pose.pose.position.x
 		self.y = msg.pose.pose.position.y
 		self.yaw = math.atan2(2.0*(msg.pose.pose.orientation.w * msg.pose.pose.orientation.z + msg.pose.pose.orientation.x * msg.pose.pose.orientation.y), 1.0-2.0*(msg.pose.pose.orientation.y * msg.pose.pose.orientation.y + msg.pose.pose.orientation.z * msg.pose.pose.orientation.z));
 		
+		
+	def scan_cbk(self, msg):
+		beta = msg.angle_incrememnt
+		i = 0
+		pRW = np.array([[self.x],
+						[self.y]])
+		RRW = np.array([[math.cos(self.yaw),-[math.sin(self.yaw)],
+						[math.sin(self.yaw),[math.cos(self.yaw)]])
+						
+		for r in msg.ranges:
+			if r<msg.range_max:
+				theta_i = msg.angle_min + beta*i
+				DR = np.array([[r*math.cos(theta_i)],
+								[r*math.sin(theta_i)]])
+				DW = RRW @	DR +rPW
+				v, u = self.map.world2map(DW[0], DW[1])
+				print(v,u)
+			i = i+1
+			
+			
 	def control_callback(self):
 		self.x
 		self.y
@@ -89,14 +112,12 @@ class hw10Controller(Node):
 
 def main(args=None):
 	rclpy.init(args=args)
-	hw10_controller = hw10Controller()
+	Project = Project()
 	
-	rclpy.spin(hw10_controller)
+	rclpy.spin(Project)
 	
-	hw10_controller.destroy_node()
+	Project.destroy_node()
 	rclpy.shutdown()
 	
 if __name__ == '__main__':
 	main() 
-
-
