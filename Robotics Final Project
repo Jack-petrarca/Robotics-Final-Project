@@ -83,8 +83,11 @@ class Project(Node):
 								[r*math.sin(theta_i)]])
 				DW = RRW @	DR +rPW
 				v, u = self.map.world2map(DW[0], DW[1])
+				xm, y = self.map.world2map(DW[0],DW[1})
+				self.map.insert_obstacle(v,u)
 				print(v,u)
 			i = i+1
+		self.map.show_map()
 			
 			
 	def control_callback(self):
