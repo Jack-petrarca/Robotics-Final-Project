@@ -1,4 +1,4 @@
-import rclpy
+import rclpy  #Code Complete as of 44 min in video from class 20251204
 import math
 from rclpy.node import Node
 
@@ -32,9 +32,10 @@ from geometry_msgs.msg import Twist
 	def insert_obstacle(self, v, u):
 		self.map[u, v] = 0
 		
-	def insert_ray(self, xm, ym, v, u):
+	def insert_ray(self, vm, um, v, u):
 		dx = abs(v - vm)
 		dx = abs(u - um)
+
 		self.map[u, v] = 0
 		
 	def show_map(self):
