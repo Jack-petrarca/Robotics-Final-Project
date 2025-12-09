@@ -29,7 +29,12 @@ from geometry_msgs.msg import Twist
 		u = np.floor((self.ymax-y)/self.res).astype(int)
 		return v, u
 
-	def insert_obstacle(self.
+	def insert_obstacle(self, v, u):c
+		self.map[u, v] = 0
+		
+	def show_map(self):
+		cv2.imshow("map", self.map)
+		cv2.waitKey(50)
 
 class hw10Controller(Node):
 	def __init__(self):
