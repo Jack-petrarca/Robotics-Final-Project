@@ -136,12 +136,12 @@ class Project(Node):
 		
 		print('end node initialization')
 
-  def spiral_motion(self):
-    t = float(self.elapsed)
-    omega_mag = max(self.omega_min, self.omega0 - self.omega_decay * t)
-    omega_spiral = +omega_mag   # CCW; flip sign for CW
-    v = self.v_spiral
-    return v, omega_spiral
+	def spiral_motion(self):
+		t = float(self.elapsed)
+		omega_mag = max(self.omega_min, self.omega0 - self.omega_decay * t)
+		omega_spiral = +omega_mag   # CCW; flip sign for CW
+		v = self.v_spiral
+		return v, omega_spiral
 
 
 		
@@ -156,7 +156,7 @@ class Project(Node):
 		self.elapsed = msg.header.stamp.sec - self.starttime
 		print("elapsed", self.elapsed)
 		
-    cmd = Twist()
+		cmd = Twist()
 
 		if self.spiral_enabled:
 			v, omega_spiral = self.spiral_motion()
@@ -204,35 +204,11 @@ class Project(Node):
 			
 			
 		
-    left_min = min(msg.ranges[0:90])
-    right_min = min(msg.ranges[270:360])
-    self.omega_avoid = 0.2*(left_min - right_min)
-
-			
+		left_min = min(msg.ranges[0:90])
+		right_min = min(msg.ranges[270:360])
+		self.omega_avoid = 0.2*(left_min - right_min)
+    	
 		self.map.show_map()
-			
-			
-#	def control_callback(self):
-#		self.x
-#		self.y
-#		self.yaw
-#		ex = self.xd - self.x
-#		ey = self.yd - self.y
-		
-#		u1 = self.kx * ex
-#		u2 = self.ky * ey
-			
-#		v = math.cos(self.yaw)*u1 + math.sin(self.yaw)*u2
-		
-#		omega = -math.sin(self.yaw)*u1/self.b + math.cos(self.yaw)*u2/self.b
-		
-#		twist_msg = Twist()
-#		twist_msg.linear.x = v
-#		twist_msg.angular.z = omega
-#		self.cmd_publisher.publish(twist_msg)
-		
-#		print(self.x, self.y, self.yaw)
-		
 
 
 def main(args=None):
