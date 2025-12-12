@@ -270,6 +270,12 @@ class Project(Node):
 
 		found, angle, dist = self.detect_pillar(msg)
 
+		
+		if self.mode == "APPROACH" and found:
+			self.target_angle = angle
+			self.target_dist = dist
+		
+
 		if self.mode == "SPIRAL" and found:
 			self.mode = "APPROACH"
 			self.target_angle = angle
