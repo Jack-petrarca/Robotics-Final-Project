@@ -114,7 +114,9 @@ class Project(Node):
 		self.yaw = 0.0 
 		self.omega = 0.0
 
-    # --- Spiral search params ---
+		
+#############################
+		# --- Spiral search params ---
 		self.spiral_enabled = True
 
 		self.v_spiral = 0.35          # m/s
@@ -123,6 +125,17 @@ class Project(Node):
 		self.omega_decay = 0.03       # rad/s per second
 
 		self.omega_avoid = 0.0        # scan-based correction
+	# --- Search / pillar behavior ---
+		self.mode = "SPIRAL"   # SPIRAL, APPROACH, ESCAPE
+		self.target_angle = 0.0
+		self.target_dist = None
+
+		self.pillar_dist_thresh = 0.8     # detect pillar within 80 cm
+		self.approach_dist = 0.45          # stop ~45 cm away
+		self.safe_dist = 0.30              # hard safety stop
+
+		self.last_pillar_time = 0.0
+############################
 
 		
 		self.starttime = 0.0
@@ -143,6 +156,34 @@ class Project(Node):
 		v = self.v_spiral
 		return v, omega_spiral
 
+	def detect_pillar(self, msg):
+		ranges = np.array(msg.ranges)
+
+		# Ignore invalid readings
+		ranges[ranges < msg.range_min] = np.inf
+		ranges[ranges > msg.range_max] = np.inf
+
+		# Look only forward +/- 60 degrees
+		center = len(ranges) // 2
+		window = int(math.radians(60) / msg.angle_increment)
+
+		sub = ranges[center-window:center+window]
+
+		idx = np.argmin(sub)
+		r_min = sub[idx]
+
+		# Pillar signature: local min surrounded by farther points
+		if r_min < self.pillar_dist_thresh:
+			left = sub[max(idx-5, 0)]
+			right = sub[min(idx+5, len(sub)-1)]
+
+			if left - r_min > 0.15 and right - r_min > 0.15:
+				angle = (idx - window) * msg.angle_increment
+				return True, angle, r_min
+
+		return False, None, None
+
+
 
 		
 	def odom_cbk(self, msg):
@@ -158,16 +199,33 @@ class Project(Node):
 		
 		cmd = Twist()
 
-		if self.spiral_enabled:
+		# ---------------- SPIRAL ----------------
+		if self.mode == "SPIRAL":
 			v, omega_spiral = self.spiral_motion()
 			cmd.linear.x = v
 			cmd.angular.z = omega_spiral + self.omega_avoid
-			cmd.angular.z = max(-1.5, min(1.5, cmd.angular.z))
-		else:
-			cmd.linear.x = 0.5
-			cmd.angular.z = self.omega_avoid
+
+		# ---------------- APPROACH ----------------
+		elif self.mode == "APPROACH":
+			cmd.angular.z = 1.5 * self.target_angle
+			cmd.linear.x = 0.2
+
+			if self.target_dist is not None and self.target_dist < self.approach_dist:
+				self.mode = "ESCAPE"
+
+			if self.target_dist is not None and self.target_dist < self.safe_dist:
+				cmd.linear.x = 0.0
+
+		# ---------------- ESCAPE ----------------
+		elif self.mode == "ESCAPE":
+			cmd.linear.x = 0.2
+			cmd.angular.z = 1.0
+
+			if self.elapsed - self.last_pillar_time > 3.0:
+				self.mode = "SPIRAL"
 
 		self.cmd_pub.publish(cmd)
+
 
 
 		
@@ -209,6 +267,15 @@ class Project(Node):
 		self.omega_avoid = 0.2*(left_min - right_min)
     	
 		self.map.show_map()
+
+		found, angle, dist = self.detect_pillar(msg)
+
+		if self.mode == "SPIRAL" and found:
+			self.mode = "APPROACH"
+			self.target_angle = angle
+			self.target_dist = dist
+			self.last_pillar_time = self.elapsed
+
 
 
 def main(args=None):
