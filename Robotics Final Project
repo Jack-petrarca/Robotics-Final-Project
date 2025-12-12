@@ -1,134 +1,247 @@
-import rclpy  #Code Complete as of 44 min in video from class 20251204
+#!/usr/bin/env python3
+import rclpy
 import math
-from rclpy.node import Node
+import numpy as np
+import cv2
+import random
+import time
 
+from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
-
-	def __init__(self, xmin, xmax, ymin, ymax, res):
-		print('Creating Map')
-		self.xmin = xmin
-		self.xmax = xmax
-		self.ymin = ymin
-		self.ymax = ymax
-		self.res = res
-		self.W = math.ceil((xmax-xmin)/res)
-		self.H = math.ceil((ymax-ymin)/res)
-		self.map = np.full((self.H, self.W), 100, dtype=np.uint8)
-		#self.map[10,15] = 255
-		#cv2.imshow("map", self.map)
-		#cv2.waitKey(50)
-	
-	def map2world(v, u):
-		x = self.res*(v+0.5)+self.xmin
-		y = -self.res*(u+0.5)+self.ymax
-		return x, y
-	
-	def world2map(x, y):
-		v = np.floor((x-self.xmin)/self.res).astype(int)
-		u = np.floor((self.ymax-y)/self.res).astype(int)
-		return v, u
-
-	def insert_obstacle(self, v, u):
-		self.map[u, v] = 0
-		
-	def insert_ray(self, vm, um, v, u):
-		dx = abs(v - vm)
-		dx = abs(u - um)
-
-		self.map[u, v] = 0
-		
-	def show_map(self):
-		cv2.imshow("map", self.map)
-		cv2.waitKey(50)
-
-class Project(Node):
-	def __init__(self):
-		print('starting node initialization...')
-		super().__init__('myfirstosnode')
-		
-		self.map = MyMap(-10, 10, -10, 10, 0.05)
-		
-		self.timer_period = 0.1
-		self.b = 0.1
-		self.x = 0
-		self.y = 0
-		self.yaw = 0 
-		
-		self.xd = 4.0 #Kyle
-		self.yd = 6.0 #Ludwig
-		
-		self.kx = 0.1
-		self.ky = 0.1
-		
-		self.cmd_publisher = self.create_publisher(Twist, '/cmd_vel', 0)
-		self.odom_subscription = self.create_subscription(Odometry, '/odom', self.odom_cbk, 0)
-		self.scan_subscription = self.create_subscription(Laserscan, '/scan', self.scan_cbk, 0)
-		self.control_timer = self.create_timer(self.timer_period, self.control_callback)
-		
-		print('end node initialization')
-		
-	def odom_cbk(self, msg):
-		self.x = msg.pose.pose.position.x
-		self.y = msg.pose.pose.position.y
-		self.yaw = math.atan2(2.0*(msg.pose.pose.orientation.w * msg.pose.pose.orientation.z + msg.pose.pose.orientation.x * msg.pose.pose.orientation.y), 1.0-2.0*(msg.pose.pose.orientation.y * msg.pose.pose.orientation.y + msg.pose.pose.orientation.z * msg.pose.pose.orientation.z));
-		
-		
-	def scan_cbk(self, msg):
-		beta = msg.angle_incrememnt
-		i = 0
-		pRW = np.array([[self.x],
-						[self.y]])
-		RRW = np.array([[math.cos(self.yaw),-[math.sin(self.yaw)],
-						[math.sin(self.yaw),[math.cos(self.yaw)]])
-						
-		vm, um = self.map.world2map(self.x, self.y)
-						
-		for r in msg.ranges:
-			if r<msg.range_max:
-				theta_i = msg.angle_min + beta*i
-				DR = np.array([[r*math.cos(theta_i)],
-								[r*math.sin(theta_i)]])
-				DW = RRW @	DR +rPW
-				v, u = self.map.world2map(DW[0], DW[1])
-				#self.map.insert_obstacle(v,u)
-				#print(v,u)
-			i = i+1
-		self.map.show_map()
-			
-			
-			
-	def control_callback(self):
-		self.x
-		self.y
-		self.yaw
-		ex = self.xd - self.x
-		ey = self.yd - self.y
-		
-		u1 = self.kx * ex
-		u2 = self.ky * ey
-			
-		v = math.cos(self.yaw)*u1 + math.sin(self.yaw)*u2
-		
-		omega = -math.sin(self.yaw)*u1/self.b + math.cos(self.yaw)*u2/self.b
-		
-		twist_msg = Twist()
-		twist_msg.linear.x = v
-		twist_msg.angular.z = omega
-		self.cmd_publisher.publish(twist_msg)
-		
-		print(self.x, self.y, self.yaw)
-		
+from sensor_msgs.msg import LaserScan
 
 
+# =========================
+# Occupancy Grid Map Class
+# =========================
+class MyMap:
+    def __init__(self, xmin, xmax, ymin, ymax, res):
+        self.xmin = xmin
+        self.xmax = xmax
+        self.ymin = ymin
+        self.ymax = ymax
+        self.res = res
+
+        self.W = int((xmax - xmin) / res)
+        self.H = int((ymax - ymin) / res)
+
+        self.map = np.full((self.H, self.W), 100, dtype=np.uint8)
+
+    def world2map(self, x, y):
+        v = int((x - self.xmin) / self.res)
+        u = int((self.ymax - y) / self.res)
+        return v, u
+
+    def insert_ray(self, vm, um, v, u, occupied):
+        free = 255
+
+        dv = abs(v - vm)
+        du = abs(u - um)
+
+        i, j = vm, um
+        step_i = 1 if v > vm else -1
+        step_j = 1 if u > um else -1
+
+        if dv > du:
+            err = dv // 2
+            while i != v:
+                if 0 <= i < self.W and 0 <= j < self.H:
+                    self.map[j, i] = free
+                err -= du
+                if err < 0:
+                    j += step_j
+                    err += dv
+                i += step_i
+        else:
+            err = du // 2
+            while j != u:
+                if 0 <= i < self.W and 0 <= j < self.H:
+                    self.map[j, i] = free
+                err -= dv
+                if err < 0:
+                    i += step_i
+                    err += du
+                j += step_j
+
+        if 0 <= v < self.W and 0 <= u < self.H:
+            self.map[u, v] = 0 if occupied else free
+
+    def show(self):
+        cv2.imshow("Occupancy Map", self.map)
+        cv2.waitKey(1)
+
+    def save(self):
+        cv2.imwrite("final_map.png", self.map)
+
+
+# =========================
+# Pillar Collector Node
+# =========================
+class PillarCollector(Node):
+    def __init__(self):
+        super().__init__('pillar_collector')
+
+        # Robot state
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+
+        # Behavior
+        self.state = "SEARCH"
+        self.target = None
+        self.escape_start = None
+
+        # Pillar tracking
+        self.collected = []
+        self.score = 0
+
+        # Mapping
+        self.map = MyMap(-10, 10, -10, 10, 0.05)
+
+        # ROS
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
+
+        self.get_logger().info("Pillar Collector Started")
+
+    # =========================
+    # Odometry
+    # =========================
+    def odom_cb(self, msg):
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
+
+        q = msg.pose.pose.orientation
+        self.yaw = math.atan2(
+            2*(q.w*q.z + q.x*q.y),
+            1 - 2*(q.y*q.y + q.z*q.z)
+        )
+
+    # =========================
+    # LaserScan
+    # =========================
+    def scan_cb(self, msg):
+        ranges = list(msg.ranges)
+        beta = msg.angle_increment
+
+        # -------- MAP UPDATE --------
+        vm, um = self.map.world2map(self.x, self.y)
+        R = np.array([[math.cos(self.yaw), -math.sin(self.yaw)],
+                      [math.sin(self.yaw),  math.cos(self.yaw)]])
+        p = np.array([[self.x], [self.y]])
+
+        for i, r in enumerate(ranges):
+            theta = msg.angle_min + beta*i
+            dist = r if r < msg.range_max else msg.range_max
+            occupied = (r < msg.range_max)
+
+            DR = np.array([[dist*math.cos(theta)],
+                           [dist*math.sin(theta)]])
+            DW = R @ DR + p
+            v, u = self.map.world2map(DW[0,0], DW[1,0])
+            self.map.insert_ray(vm, um, v, u, occupied)
+
+        self.map.show()
+
+        # -------- COLLISION OVERRIDE --------
+        front = min(ranges[0:10] + ranges[-10:])
+        if front < 0.08:
+            self.publish_cmd(-0.05, 1.0)
+            return
+
+        # -------- BEHAVIOR --------
+        if self.state == "SEARCH":
+            self.search(ranges, msg)
+
+        elif self.state == "APPROACH":
+            self.approach()
+
+        elif self.state == "COLLECT":
+            self.collect()
+
+        elif self.state == "ESCAPE":
+            self.escape()
+
+    # =========================
+    # STATES
+    # =========================
+    def search(self, ranges, msg):
+        for i in range(10, len(ranges)-10):
+            if ranges[i] < 0.6 and \
+               ranges[i] < ranges[i-5] and \
+               ranges[i] < ranges[i+5]:
+
+                theta = msg.angle_min + i*msg.angle_increment
+                px = self.x + ranges[i]*math.cos(self.yaw + theta)
+                py = self.y + ranges[i]*math.sin(self.yaw + theta)
+
+                if self.is_new_pillar(px, py):
+                    self.target = (px, py)
+                    self.state = "APPROACH"
+                    return
+
+        self.publish_cmd(0.2, 0.3*random.choice([-1,1]))
+
+    def approach(self):
+        tx, ty = self.target
+        dx, dy = tx-self.x, ty-self.y
+        dist = math.hypot(dx, dy)
+        angle = math.atan2(dy, dx)
+        error = self.wrap(angle - self.yaw)
+
+        if 0.08 < dist < 0.10:
+            self.state = "COLLECT"
+            return
+
+        self.publish_cmd(min(0.2, dist), 1.5*error)
+
+    def collect(self):
+        self.collected.append(self.target)
+        self.score += 1
+        self.get_logger().info(f"Collected pillar #{self.score}")
+        self.escape_start = time.time()
+        self.state = "ESCAPE"
+
+    def escape(self):
+        if time.time() - self.escape_start < 1.5:
+            self.publish_cmd(-0.1, 1.0)
+        else:
+            self.state = "SEARCH"
+
+    # =========================
+    # UTILITIES
+    # =========================
+    def publish_cmd(self, v, w):
+        msg = Twist()
+        msg.linear.x = v
+        msg.angular.z = w
+        self.cmd_pub.publish(msg)
+
+    def is_new_pillar(self, x, y):
+        for cx, cy in self.collected:
+            if math.hypot(x-cx, y-cy) < 0.25:
+                return False
+        return True
+
+    def wrap(self, a):
+        return (a + math.pi) % (2*math.pi) - math.pi
+
+
+# =========================
+# Main
+# =========================
 def main(args=None):
-	rclpy.init(args=args)
-	Project = Project()
-	
-	rclpy.spin(Project)
-	
-	Project.destroy_node()
-	rclpy.shutdown()
-	
+    rclpy.init(args=args)
+    node = PillarCollector()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.map.save()
+    node.destroy_node()
+    rclpy.shutdown()
+
+
 if __name__ == '__main__':
-	main() 
+    main()
