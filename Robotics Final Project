@@ -3,8 +3,8 @@ import rclpy
 import math
 import numpy as np
 import cv2
-import random
 import time
+import random
 
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
@@ -13,7 +13,7 @@ from sensor_msgs.msg import LaserScan
 
 
 # =========================
-# Occupancy Grid Map Class
+# Mapping (Occupancy Image)
 # =========================
 class MyMap:
     def __init__(self, xmin, xmax, ymin, ymax, res):
@@ -23,18 +23,26 @@ class MyMap:
         self.ymax = ymax
         self.res = res
 
-        self.W = int((xmax - xmin) / res)
-        self.H = int((ymax - ymin) / res)
+        self.W = int(math.ceil((xmax - xmin) / res))
+        self.H = int(math.ceil((ymax - ymin) / res))
 
+        # 100 = unknown (gray), 255 = free (white), 0 = occupied (black)
         self.map = np.full((self.H, self.W), 100, dtype=np.uint8)
 
     def world2map(self, x, y):
-        v = int((x - self.xmin) / self.res)
-        u = int((self.ymax - y) / self.res)
+        # v = column (x), u = row (y flipped for image coordinates)
+        v = int(math.floor((x - self.xmin) / self.res))
+        u = int(math.floor((self.ymax - y) / self.res))
         return v, u
 
     def insert_ray(self, vm, um, v, u, occupied):
         free = 255
+
+        # Clip coordinates to valid bounds
+        vm = max(0, min(self.W - 1, vm))
+        um = max(0, min(self.H - 1, um))
+        v = max(0, min(self.W - 1, v))
+        u = max(0, min(self.H - 1, u))
 
         dv = abs(v - vm)
         du = abs(u - um)
@@ -68,177 +76,384 @@ class MyMap:
             self.map[u, v] = 0 if occupied else free
 
     def show(self):
-        cv2.imshow("Occupancy Map", self.map)
+        cv2.imshow("map", self.map)
         cv2.waitKey(1)
 
-    def save(self):
-        cv2.imwrite("final_map.png", self.map)
+    def save(self, filename="my_map.png"):
+        cv2.imwrite(filename, self.map)
 
 
 # =========================
-# Pillar Collector Node
+# Explorer / Collector Node
 # =========================
-class PillarCollector(Node):
+class Explorer(Node):
     def __init__(self):
-        super().__init__('pillar_collector')
+        super().__init__('explorer_w1')
 
-        # Robot state
+        # Spec
+        self.T_LIMIT = 90.0
+        self.VISIT_RADIUS = 0.50          # within 50 cm of cylinder center
+        self.CYL_RADIUS = 0.10            # cylinder radius (for safety intuition)
+        self.DEDUP_RADIUS = 0.75          # treat anything within this as same cylinder
+
+        # Safety thresholds
+        self.HARD_STOP = 0.18             # emergency stop distance
+        self.SOFT_AVOID = 0.35            # start steering away
+
+        # Exploration parameters
+        self.WANDER_CHANGE_RATE = 0.02    # probability of changing wander direction
+        self.STRAIGHT_TIME_LIMIT = 3.0    # force turn after going straight this long
+        
+        # Escape parameters
+        self.ESCAPE_DURATION = 0.9        # escape time after visiting (seconds)
+
+        # Robot pose
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
 
-        # Behavior
-        self.state = "SEARCH"
-        self.target = None
-        self.escape_start = None
+        # Behavior state
+        self.state = "SEARCH"             # SEARCH -> APPROACH -> ESCAPE
+        self.target = None                # (tx, ty)
+        self.escape_until = None          # wall-clock time
 
-        # Pillar tracking
-        self.collected = []
-        self.score = 0
+        # Memory of visited cylinders (world coords)
+        self.visited = []
+        self.visited_count = 0
+
+        # Exploration state
+        self._wander_bias = 0.0
+        self._last_turn_time = time.time()
+
+        # Timing
+        self.t0 = time.time()
 
         # Mapping
-        self.map = MyMap(-10, 10, -10, 10, 0.05)
+        self.map = MyMap(-10.0, 10.0, -10.0, 10.0, 0.05)
 
-        # ROS
+        # ROS I/O
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.create_subscription(Odometry, '/odom', self.odom_cb, 10)
         self.create_subscription(LaserScan, '/scan', self.scan_cb, 10)
 
-        self.get_logger().info("Pillar Collector Started")
+        self.get_logger().info("Explorer running (90s). Mapping always on. Visiting cylinders prioritized.")
 
-    # =========================
-    # Odometry
-    # =========================
+    # ---------- ROS callbacks ----------
     def odom_cb(self, msg):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
 
         q = msg.pose.pose.orientation
         self.yaw = math.atan2(
-            2*(q.w*q.z + q.x*q.y),
-            1 - 2*(q.y*q.y + q.z*q.z)
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
 
-    # =========================
-    # LaserScan
-    # =========================
-    def scan_cb(self, msg):
-        ranges = list(msg.ranges)
-        beta = msg.angle_increment
+    def scan_cb(self, msg: LaserScan):
+        # Stop & save at 90s
+        elapsed = time.time() - self.t0
+        if elapsed >= self.T_LIMIT:
+            self.publish_cmd(0.0, 0.0)
+            self.map.save("my_map.png")
+            self.get_logger().info(f"Time up. Visited={self.visited_count}. Saved my_map.png. Shutting down.")
+            rclpy.shutdown()
+            return
 
-        # -------- MAP UPDATE --------
+        ranges = np.array(msg.ranges, dtype=float)
+        # Replace invalids with inf for mins
+        ranges = np.where(np.isfinite(ranges), ranges, np.inf)
+
+        # ---------- MAP UPDATE (always) ----------
+        self.update_map_from_scan(msg, ranges)
+
+        # ---------- SAFETY OVERRIDE ----------
+        front = self.min_sector(ranges, 0.0, 20.0, msg)
+        if front < self.HARD_STOP:
+            # Emergency backup + turn
+            self.publish_cmd(-0.08, 1.2)
+            self.state = "SEARCH"
+            self.target = None
+            return
+
+        # ---------- DETECT CYLINDER CANDIDATES ----------
+        candidates = self.detect_cylinders(msg, ranges)
+
+        # Choose a target if searching
+        if self.state == "SEARCH":
+            best = self.pick_best_target(candidates)
+            if best is not None:
+                self.target = best
+                self.state = "APPROACH"
+                self.get_logger().info(f"Targeting cylinder at ({best[0]:.2f}, {best[1]:.2f})")
+            else:
+                # Exploration: forward + gentle bias + obstacle-aware steering
+                self.explore_motion(ranges, msg)
+                return
+
+        # Approach handling
+        if self.state == "APPROACH":
+            self.approach_target(ranges, msg)
+            return
+
+        # Escape handling
+        if self.state == "ESCAPE":
+            if self.escape_until is not None and time.time() < self.escape_until:
+                self.publish_cmd(-0.08, 1.0)
+            else:
+                self.state = "SEARCH"
+                self.target = None
+            return
+
+    # ---------- Mapping ----------
+    def update_map_from_scan(self, msg, ranges):
+        beta = msg.angle_increment
         vm, um = self.map.world2map(self.x, self.y)
-        R = np.array([[math.cos(self.yaw), -math.sin(self.yaw)],
-                      [math.sin(self.yaw),  math.cos(self.yaw)]])
-        p = np.array([[self.x], [self.y]])
+
+        cy, sy = math.cos(self.yaw), math.sin(self.yaw)
+        R = np.array([[cy, -sy],
+                      [sy,  cy]], dtype=float)
+        p = np.array([[self.x], [self.y]], dtype=float)
+
+        rmax = msg.range_max
 
         for i, r in enumerate(ranges):
-            theta = msg.angle_min + beta*i
-            dist = r if r < msg.range_max else msg.range_max
-            occupied = (r < msg.range_max)
+            theta = msg.angle_min + beta * i
+            dist = float(r if r < rmax else rmax)
+            occupied = bool(r < rmax)
 
-            DR = np.array([[dist*math.cos(theta)],
-                           [dist*math.sin(theta)]])
+            DR = np.array([[dist * math.cos(theta)],
+                           [dist * math.sin(theta)]], dtype=float)
             DW = R @ DR + p
-            v, u = self.map.world2map(DW[0,0], DW[1,0])
+
+            v, u = self.map.world2map(float(DW[0, 0]), float(DW[1, 0]))
             self.map.insert_ray(vm, um, v, u, occupied)
 
         self.map.show()
 
-        # -------- COLLISION OVERRIDE --------
-        front = min(ranges[0:10] + ranges[-10:])
-        if front < 0.08:
-            self.publish_cmd(-0.05, 1.0)
-            return
+    # ---------- Cylinder detection ----------
+    def detect_cylinders(self, msg, ranges):
+        """
+        Returns list of candidate cylinder centers in WORLD frame: [(x,y), ...]
+        Improved: uses centroid of segment for better accuracy
+        """
+        rmax = msg.range_max
+        valid = np.isfinite(ranges) & (ranges < rmax)
 
-        # -------- BEHAVIOR --------
-        if self.state == "SEARCH":
-            self.search(ranges, msg)
+        idxs = np.where(valid)[0]
+        if idxs.size == 0:
+            return []
 
-        elif self.state == "APPROACH":
-            self.approach()
+        # Group contiguous valid indices
+        groups = []
+        start = idxs[0]
+        prev = idxs[0]
+        for k in idxs[1:]:
+            if k == prev + 1:
+                prev = k
+            else:
+                groups.append((start, prev))
+                start = k
+                prev = k
+        groups.append((start, prev))
 
-        elif self.state == "COLLECT":
-            self.collect()
+        candidates = []
+        for a, b in groups:
+            if b - a < 2:
+                continue
 
-        elif self.state == "ESCAPE":
-            self.escape()
+            segment = ranges[a:b+1]
+            rmin = float(np.min(segment))
+            
+            # Filter by reasonable distance range
+            if not (0.2 < rmin < 3.5):
+                continue
 
-    # =========================
-    # STATES
-    # =========================
-    def search(self, ranges, msg):
-        for i in range(10, len(ranges)-10):
-            if ranges[i] < 0.6 and \
-               ranges[i] < ranges[i-5] and \
-               ranges[i] < ranges[i+5]:
+            # Angular width of segment
+            width_rad = (b - a) * msg.angle_increment
 
-                theta = msg.angle_min + i*msg.angle_increment
-                px = self.x + ranges[i]*math.cos(self.yaw + theta)
-                py = self.y + ranges[i]*math.sin(self.yaw + theta)
+            # Expected angular width of a 0.1m radius cylinder at distance r
+            R = self.CYL_RADIUS
+            if rmin <= R:
+                continue
+            expected = 2.0 * math.asin(min(0.999, R / rmin))
 
-                if self.is_new_pillar(px, py):
-                    self.target = (px, py)
-                    self.state = "APPROACH"
-                    return
+            # Tightened thresholds for better precision
+            if width_rad < 0.5 * expected or width_rad > 2.5 * expected:
+                continue
 
-        self.publish_cmd(0.2, 0.3*random.choice([-1,1]))
+            # Use centroid of segment for better center estimation
+            angles = msg.angle_min + np.arange(a, b+1) * msg.angle_increment
+            avg_angle = float(np.mean(angles))
+            avg_range = float(np.mean(segment))
+            
+            px = self.x + avg_range * math.cos(self.yaw + avg_angle)
+            py = self.y + avg_range * math.sin(self.yaw + avg_angle)
 
-    def approach(self):
-        tx, ty = self.target
-        dx, dy = tx-self.x, ty-self.y
-        dist = math.hypot(dx, dy)
-        angle = math.atan2(dy, dx)
-        error = self.wrap(angle - self.yaw)
+            if self.is_new_cylinder(px, py):
+                candidates.append((px, py))
 
-        if 0.08 < dist < 0.10:
-            self.state = "COLLECT"
-            return
+        return candidates
 
-        self.publish_cmd(min(0.2, dist), 1.5*error)
+    def pick_best_target(self, candidates):
+        """
+        Improved target selection: considers both distance and alignment
+        """
+        if not candidates:
+            return None
+        
+        best = None
+        best_score = -1e9
+        
+        for (tx, ty) in candidates:
+            dx, dy = tx - self.x, ty - self.y
+            dist = math.hypot(dx, dy)
+            ang = math.atan2(dy, dx)
+            err = abs(self.wrap(ang - self.yaw))
+            
+            # Score: prefer closer targets that are more aligned
+            # Distance weight: 1.0 / (dist + 0.1)
+            # Alignment weight: -0.5 * err (prefer smaller angular errors)
+            score = 1.0 / (dist + 0.1) - 0.5 * err
+            
+            if score > best_score:
+                best_score = score
+                best = (tx, ty)
+        
+        return best
 
-    def collect(self):
-        self.collected.append(self.target)
-        self.score += 1
-        self.get_logger().info(f"Collected pillar #{self.score}")
-        self.escape_start = time.time()
-        self.state = "ESCAPE"
-
-    def escape(self):
-        if time.time() - self.escape_start < 1.5:
-            self.publish_cmd(-0.1, 1.0)
-        else:
-            self.state = "SEARCH"
-
-    # =========================
-    # UTILITIES
-    # =========================
-    def publish_cmd(self, v, w):
-        msg = Twist()
-        msg.linear.x = v
-        msg.angular.z = w
-        self.cmd_pub.publish(msg)
-
-    def is_new_pillar(self, x, y):
-        for cx, cy in self.collected:
-            if math.hypot(x-cx, y-cy) < 0.25:
+    def is_new_cylinder(self, x, y):
+        for (vx, vy) in self.visited:
+            if math.hypot(x - vx, y - vy) < self.DEDUP_RADIUS:
                 return False
         return True
 
+    # ---------- Motion ----------
+    def approach_target(self, ranges, msg):
+        if self.target is None:
+            self.state = "SEARCH"
+            return
+
+        tx, ty = self.target
+        dx, dy = tx - self.x, ty - self.y
+        dist = math.hypot(dx, dy)
+        ang = math.atan2(dy, dx)
+        err = self.wrap(ang - self.yaw)
+
+        # If we are within 0.50m of center => visited
+        if dist <= self.VISIT_RADIUS:
+            self.visited.append(self.target)
+            self.visited_count += 1
+            self.get_logger().info(f"✓ Visited cylinder #{self.visited_count} at ({tx:.2f}, {ty:.2f})")
+
+            # Escape to avoid re-visiting & collisions
+            self.state = "ESCAPE"
+            self.escape_until = time.time() + self.ESCAPE_DURATION
+            return
+
+        # Soft avoidance while approaching
+        front = self.min_sector(ranges, 0.0, 40.0, msg)
+        left  = self.min_sector(ranges, 60.0, 60.0, msg)
+        right = self.min_sector(ranges, -60.0, 60.0, msg)
+
+        avoid = 0.0
+        if front < self.SOFT_AVOID:
+            avoid += 1.2
+        avoid += 0.6 * (1.0 / max(right, 0.05) - 1.0 / max(left, 0.05))
+
+        # Control: slow down near target
+        v = min(0.30, 0.25 + 0.15 * (dist - self.VISIT_RADIUS))
+        v = max(0.10, v)
+        w = 2.0 * err + avoid
+        w = float(np.clip(w, -1.8, 1.8))
+
+        self.publish_cmd(v, w)
+
+    def explore_motion(self, ranges, msg):
+        """
+        Improved exploration with better coverage strategy
+        """
+        front = self.min_sector(ranges, 0.0, 50.0, msg)
+        left  = self.min_sector(ranges, 70.0, 70.0, msg)
+        right = self.min_sector(ranges, -70.0, 70.0, msg)
+
+        # If something ahead, turn toward the more open side
+        if front < self.SOFT_AVOID:
+            turn = 1.2 if left > right else -1.2
+            self.publish_cmd(0.05, turn)
+            self._last_turn_time = time.time()
+            return
+
+        # Random bias change for varied exploration
+        if random.random() < self.WANDER_CHANGE_RATE:
+            self._wander_bias = random.uniform(-0.6, 0.6)
+
+        # Force a turn if going straight too long (prevents getting stuck in corners)
+        if time.time() - self._last_turn_time > self.STRAIGHT_TIME_LIMIT:
+            self._wander_bias = random.choice([-0.8, 0.8])
+            self._last_turn_time = time.time()
+
+        # Combine wander bias with obstacle avoidance
+        openness = (left - right)
+        w = 0.5 * self._wander_bias - 0.3 * openness
+        w = float(np.clip(w, -0.8, 0.8))
+
+        self.publish_cmd(0.35, w)
+
+    # ---------- helpers ----------
+    def publish_cmd(self, v, w):
+        cmd = Twist()
+        cmd.linear.x = float(v)
+        cmd.angular.z = float(w)
+        self.cmd_pub.publish(cmd)
+
     def wrap(self, a):
-        return (a + math.pi) % (2*math.pi) - math.pi
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    def min_sector(self, ranges, center_deg, width_deg, msg):
+        """
+        center_deg: 0 is forward, positive is left, negative is right
+        Returns minimum distance in specified sector
+        """
+        n = len(ranges)
+        if n == 0:
+            return float("inf")
+
+        center_rad = math.radians(center_deg)
+        half = math.radians(width_deg / 2.0)
+
+        # Convert desired angles to indices
+        def ang_to_idx(theta):
+            return int(round((theta - msg.angle_min) / msg.angle_increment))
+
+        i0 = ang_to_idx(center_rad - half)
+        i1 = ang_to_idx(center_rad + half)
+
+        # Clamp and wrap
+        i0 = max(0, min(n - 1, i0))
+        i1 = max(0, min(n - 1, i1))
+        
+        if i0 <= i1:
+            seg = ranges[i0:i1+1]
+        else:
+            seg = np.concatenate([ranges[i0:], ranges[:i1+1]])
+
+        m = float(np.min(seg)) if seg.size else float("inf")
+        return m
 
 
-# =========================
-# Main
-# =========================
 def main(args=None):
     rclpy.init(args=args)
-    node = PillarCollector()
+    node = Explorer()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.map.save()
+        pass
+    # Save on manual stop too
+    try:
+        node.map.save("my_map.png")
+        node.get_logger().info(f"Map saved. Final count: {node.visited_count} cylinders visited.")
+    except Exception as e:
+        print(f"Error saving map: {e}")
     node.destroy_node()
     rclpy.shutdown()
 
