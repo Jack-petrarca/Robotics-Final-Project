@@ -23,21 +23,25 @@ class MyMap():
 		
 		self.map = np.full((self.H, self.W), 100, dtype=np.uint8)
 		
+	def __del__(self):
+		cv2.imwrite('my_map.png', self.map)
+		
 	def saveMap(self):
 		cv2.imwrite('my_map.png', self.map)
 		
 	def map2world(self, v, u):
 		x = self.res*(v+0.5) + self.xmin
-		y = self.res*(u+0.5) + self.ymin
+		y = self.res*(u+0.5) + self.ymax
 		return x, y
 		
 	def world2map(self, x, y):
-		v = np.floor((x - self.xmax)/self.res).astype(int)
+		v = np.floor((x - self.xmin)/self.res).astype(int)
 		u = np.floor((self.ymax - y)/self.res).astype(int)
 		return v, u
 		
 	def insert_obsticle(self, v, u):
 		self.map[u, v] = 0
+		#self.map[v, u] = 0
 		
 	def insert_ray(self, vm, um, v, u, occupied):
 		free = 255
@@ -76,7 +80,7 @@ class MyMap():
 				if err < 0:
 					i += step_i
 					err += du
-				j += step_i
+				j += step_j
 		
 				
 		if occupied == True:
@@ -88,7 +92,6 @@ class MyMap():
 			if v > 0 and v < self.W:
 				if u > 0 and u < self.H:
 					self.map [u, v] = free
-					print('not occupied')
 					
 		
 					
@@ -109,11 +112,15 @@ class Project(Node):
 		self.x = 0.0
 		self.y = 0.0
 		self.yaw = 0.0 
+		self.omega = 0.0
+		
+		self.starttime = 0.0
+		self.elapsed = 0.0
 		self.started = False
 		
-		self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 0)
-		self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_cbk, 0)
-		self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_cbk, 0)
+		self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+		self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_cbk, 10)
+		self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_cbk, 10)
 		#self.control_timer = self.create_timer(self.timer_period, self.control_callback)
 		
 		print('end node initialization')
@@ -126,12 +133,13 @@ class Project(Node):
 		if self.started == False:
 			self.started = True
 			self.starttime = msg.header.stamp.sec
-		self.elapsed = msg.header.stamp.sec = self.starttime
+		self.elapsed = msg.header.stamp.sec - self.starttime
 		print("elapsed", self.elapsed)
 		
 		cmd = Twist()
-		cmd.linear.x = 0.0
+		cmd.linear.x = 0.5
 		cmd.angular.z = 0.0
+		cmd.angular.z = self.omega
 		self.cmd_pub.publish(cmd)
 		
 		
@@ -160,12 +168,16 @@ class Project(Node):
 				DW = RRW @	DR +pRW
 				v, u = self.map.world2map(DW[0], DW[1])
 				self.map.insert_ray(vm, um, v, u, False)
-		if self.elapsed == 90:
-			cv2.imwrite("mymap.png", self.map.map)
 			i = i+1
+		
+		if self.elapsed == 10:
+			cv2.imwrite("mymap.png", self.map.map)
+			
+			
+		
 		left_min = min(msg.ranges[0:90])
 		right_min = min(msg.ranges[270:360])
-				
+		self.omega = 0.2*(left_min - right_min)
 			
 		self.map.show_map()
 			
