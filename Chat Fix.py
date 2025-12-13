@@ -122,10 +122,8 @@ class Project(Node):
 		self.tx = 0.0
 		self.ty = 0.0
 		
-		# --- Prevent immediate re-targeting after collection ---
-		self.just_collected = False
-		self.cooldown_counter = 0
-		self.COOLDOWN_DURATION = 15  # Number of callbacks to ignore targets after collection
+		# --- Exploration when no target ---
+		self.explore_direction = 0.0  # Direction to explore when no pillars visible
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -229,23 +227,7 @@ class Project(Node):
 		
 		cmd = Twist()
 		
-		# Handle cooldown after collection
-		if self.just_collected:
-			self.cooldown_counter += 1
-			if self.cooldown_counter < self.COOLDOWN_DURATION:
-				# Just do wall following during cooldown
-				left_min = min(msg.ranges[0:90])
-				right_min = min(msg.ranges[270:360])
-				cmd.linear.x = 0.4
-				cmd.angular.z = 0.3 * (left_min - right_min)
-				self.cmd_pub.publish(cmd)
-				return
-			else:
-				# Cooldown over
-				self.just_collected = False
-				self.cooldown_counter = 0
-		
-		# Detect pillars only if not in cooldown
+		# Detect pillars
 		pillars = self.detect_pillars(msg)
 		
 		targets = []
@@ -289,9 +271,6 @@ class Project(Node):
 					self.visited.append((self.tx, self.ty))
 					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
 					print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f})")
-					# Enter cooldown mode
-					self.just_collected = True
-					self.cooldown_counter = 0
 				self.have_target = False
 			
 			else:
@@ -299,10 +278,26 @@ class Project(Node):
 				cmd.linear.x = -0.1
 
 		else:
-			left_min = min(msg.ranges[0:90])
-			right_min = min(msg.ranges[270:360])
+			# No target - explore by picking a direction and driving
+			front_min = min(msg.ranges[165:195]) if len(msg.ranges) > 195 else msg.range_max
+			
+			# If obstacle ahead, pick a new explore direction
+			if front_min < 0.5:
+				left_min = min(msg.ranges[0:90])
+				right_min = min(msg.ranges[270:360])
+				# Turn towards more open side
+				if left_min > right_min:
+					self.explore_direction = self.yaw + math.pi / 4  # Turn left
+				else:
+					self.explore_direction = self.yaw - math.pi / 4  # Turn right
+			
+			# Drive towards explore direction
+			angle_error = math.atan2(
+				math.sin(self.explore_direction - self.yaw),
+				math.cos(self.explore_direction - self.yaw)
+			)
 			cmd.linear.x = 0.4
-			cmd.angular.z = 0.25 * (left_min - right_min)
+			cmd.angular.z = 1.0 * angle_error
 		
 		self.cmd_pub.publish(cmd)
 
