@@ -84,6 +84,45 @@ class MyMap():
 		else:
 			if 0 < v < self.W and 0 < u < self.H:
 				self.map[u, v] = free
+	
+	def mark_visited_pillar(self, x, y, radius=0.6):
+		"""Mark a visited pillar on the map with value 50 (gray)"""
+		v, u = self.world2map(x, y)
+		radius_cells = int(radius / self.res)
+		for i in range(-radius_cells, radius_cells + 1):
+			for j in range(-radius_cells, radius_cells + 1):
+				if i*i + j*j <= radius_cells*radius_cells:
+					vi = v + i
+					uj = u + j
+					if 0 <= vi < self.W and 0 <= uj < self.H:
+						self.map[uj, vi] = 50  # Mark as visited (gray)
+	
+	def get_unexplored_direction(self, robot_x, robot_y):
+		"""Find direction with most unexplored (gray=100) space"""
+		v, u = self.world2map(robot_x, robot_y)
+		
+		# Check 8 directions around robot
+		directions = []
+		angles = [0, 45, 90, 135, 180, 225, 270, 315]
+		search_dist = 40  # cells to search in each direction
+		
+		for angle_deg in angles:
+			angle_rad = math.radians(angle_deg)
+			unexplored_count = 0
+			
+			for d in range(10, search_dist):
+				vi = v + int(d * math.cos(angle_rad))
+				uj = u - int(d * math.sin(angle_rad))
+				
+				if 0 <= vi < self.W and 0 <= uj < self.H:
+					if self.map[uj, vi] == 100:  # Unexplored
+						unexplored_count += 1
+			
+			directions.append((unexplored_count, angle_rad))
+		
+		# Return angle with most unexplored space
+		directions.sort(reverse=True)
+		return directions[0][1] if directions[0][0] > 0 else None
 					
 	def show_map(self):
 		cv2.imshow("map", self.map)
@@ -105,15 +144,16 @@ class Project(Node):
 		
 		# --- Pillar targeting state ---
 		self.visited = []
-		self.visit_radius = 0.65
+		self.visit_radius = 0.6
 		self.have_target = False
 		self.tx = 0.0
 		self.ty = 0.0
 		
-		# --- Spiral navigation parameters ---
-		self.spiral_mode = True
-		self.base_speed = 0.35
-		self.spiral_turn_rate = 0.15  # Gentle constant turn for spiral
+		# --- Navigation mode ---
+		self.exploring_mode = False
+		self.explore_target_angle = 0.0
+		self.explore_counter = 0
+		self.EXPLORE_DURATION = 30  # How long to head in explore direction
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -140,6 +180,7 @@ class Project(Node):
 			self.starttime = msg.header.stamp.sec
 			
 		self.elapsed = msg.header.stamp.sec - self.starttime
+		print("elapsed", self.elapsed, "visited:", len(self.visited))
 		
 	def detect_pillars(self, msg):
 		pillars = []
@@ -215,8 +256,43 @@ class Project(Node):
 		
 		self.map.show_map()
 		
-		# Detect pillars for opportunistic collection
+		cmd = Twist()
+		
+		# If in exploring mode, head towards unexplored area
+		if self.exploring_mode:
+			self.explore_counter += 1
+			if self.explore_counter < self.EXPLORE_DURATION:
+				# Drive towards explore target angle
+				angle_error = math.atan2(
+					math.sin(self.explore_target_angle - self.yaw),
+					math.cos(self.explore_target_angle - self.yaw)
+				)
+				cmd.angular.z = 1.2 * angle_error
+				cmd.linear.x = 0.4
+				self.cmd_pub.publish(cmd)
+				
+				# Still check for pillars during exploration
+				pillars = self.detect_pillars(msg)
+				targets = []
+				for cluster in pillars:
+					xw, yw = self.cluster_to_world(cluster, msg)
+					if not self.is_visited(xw, yw):
+						dist = math.hypot(xw - self.x, yw - self.y)
+						targets.append((dist, xw, yw))
+				
+				if targets:
+					# Found a pillar, exit explore mode
+					self.exploring_mode = False
+					self.explore_counter = 0
+				return
+			else:
+				# Done exploring, return to normal
+				self.exploring_mode = False
+				self.explore_counter = 0
+		
+		# Detect and target pillars
 		pillars = self.detect_pillars(msg)
+		
 		targets = []
 		for cluster in pillars:
 			xw, yw = self.cluster_to_world(cluster, msg)
@@ -224,78 +300,53 @@ class Project(Node):
 				dist = math.hypot(xw - self.x, yw - self.y)
 				targets.append((dist, xw, yw))
 		
-		# Check for close unvisited pillars
-		close_pillar = False
 		if targets:
 			targets.sort()
-			closest_dist, self.tx, self.ty = targets[0]
-			if closest_dist < 1.5:  # If pillar is close, go for it
-				self.have_target = True
-				close_pillar = True
-			else:
-				self.have_target = False
+			_, self.tx, self.ty = targets[0]
+			self.have_target = True
 		else:
 			self.have_target = False
+			# No targets visible - use map to find unexplored direction
+			unexplored_angle = self.map.get_unexplored_direction(self.x, self.y)
+			if unexplored_angle is not None:
+				print(f"No pillars visible, exploring towards {math.degrees(unexplored_angle):.1f}°")
+				self.exploring_mode = True
+				self.explore_target_angle = unexplored_angle
+				self.explore_counter = 0
 		
-		cmd = Twist()
-		
-		# Check boundaries - turn away from walls
-		near_boundary = False
-		BOUNDARY_MARGIN = 1.0
-		if abs(self.x) > 10.0 - BOUNDARY_MARGIN or abs(self.y) > 10.0 - BOUNDARY_MARGIN:
-			near_boundary = True
-		
-		# Get obstacle distances
-		front_min = min(msg.ranges[165:195]) if len(msg.ranges) > 195 else msg.range_max
-		left_min = min(msg.ranges[45:135]) if len(msg.ranges) > 135 else msg.range_max
-		right_min = min(msg.ranges[225:315]) if len(msg.ranges) > 315 else msg.range_max
-		
-		# Priority 1: Collect close pillars
-		if self.have_target and close_pillar:
+		if self.have_target:
 			dx = self.tx - self.x
 			dy = self.ty - self.y
 			dist = math.hypot(dx, dy)
 			
-			if dist < 0.52:  # Collected
-				self.visited.append((self.tx, self.ty))
-				print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f})")
-				self.have_target = False
-			else:
-				# Drive towards pillar
-				target_angle = math.atan2(dy, dx)
-				angle_error = math.atan2(
-					math.sin(target_angle - self.yaw),
-					math.cos(target_angle - self.yaw)
-				)
-				cmd.angular.z = 2.0 * angle_error
-				cmd.linear.x = 0.3
-		
-		# Priority 2: Avoid obstacles
-		elif front_min < 0.4:
-			cmd.linear.x = 0.0
-			# Turn towards more open side
-			cmd.angular.z = 1.2 if left_min > right_min else -1.2
-		
-		# Priority 3: Stay in bounds
-		elif near_boundary:
-			# Turn towards center
-			angle_to_center = math.atan2(-self.y, -self.x)
+			target_angle = math.atan2(dy, dx)
 			angle_error = math.atan2(
-				math.sin(angle_to_center - self.yaw),
-				math.cos(angle_to_center - self.yaw)
+				math.sin(target_angle - self.yaw),
+				math.cos(target_angle - self.yaw)
 			)
-			cmd.linear.x = 0.2
-			cmd.angular.z = 1.5 * angle_error
-		
-		# Priority 4: Spiral exploration
-		else:
-			# Gentle spiral - constant forward with slight turn
-			cmd.linear.x = self.base_speed
-			cmd.angular.z = self.spiral_turn_rate
 			
-			# Adjust turn rate based on distance from center (tighter spiral further out)
-			dist_from_center = math.hypot(self.x, self.y)
-			cmd.angular.z = self.spiral_turn_rate * (1.0 + dist_from_center / 10.0)
+			COLLECT_RADIUS = 0.50
+			
+			if dist > COLLECT_RADIUS:
+				# Approaching the pillar
+				cmd.angular.z = 1.5 * angle_error
+				cmd.linear.x = 0.3
+			else:
+				# Collected! Mark as visited on map and in list
+				self.visited.append((self.tx, self.ty))
+				self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
+				print(f"✓ Collected pillar at ({self.tx:.2f}, {self.ty:.2f}), total: {len(self.visited)}")
+				self.have_target = False
+				# Continue with simple forward motion
+				cmd.linear.x = 0.3
+				cmd.angular.z = 0.0
+
+		else:
+			# Exploration mode - wall following
+			left_min = min(msg.ranges[0:90])
+			right_min = min(msg.ranges[270:360])
+			cmd.linear.x = 0.4
+			cmd.angular.z = 0.3 * (left_min - right_min)
 		
 		self.cmd_pub.publish(cmd)
 
@@ -306,6 +357,10 @@ def main(args=None):
 	rclpy.spin(node)
 	node.destroy_node()
 	rclpy.shutdown()
+
+
+if __name__ == '__main__':
+	main()
 
 
 if __name__ == '__main__':
