@@ -105,7 +105,7 @@ class Project(Node):
 		
 		# --- Pillar targeting state ---
 		self.visited = []
-		self.visit_radius = 0.6
+		self.visit_radius = 0.75  # Increased from 0.6 to better filter visited pillars
 		self.have_target = False
 		self.tx = 0.0
 		self.ty = 0.0
@@ -113,7 +113,7 @@ class Project(Node):
 		# --- Escape state to prevent getting stuck ---
 		self.escaping = False
 		self.escape_counter = 0
-		self.ESCAPE_DURATION = 15  # Number of scan callbacks to escape
+		self.ESCAPE_DURATION = 20  # Number of scan callbacks to escape (increased)
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -223,8 +223,8 @@ class Project(Node):
 			self.escape_counter += 1
 			if self.escape_counter < self.ESCAPE_DURATION:
 				# Back up and turn to clear the area
-				cmd.linear.x = -0.2
-				cmd.angular.z = 0.8
+				cmd.linear.x = -0.25
+				cmd.angular.z = 0.6
 				self.cmd_pub.publish(cmd)
 				return
 			else:
@@ -267,14 +267,15 @@ class Project(Node):
 				cmd.angular.z = 1.5 * angle_error
 				cmd.linear.x = 0.3
 			else:
-				# Within collection radius - mark as visited and escape
+				# Within collection radius - mark as visited FIRST, then escape
 				self.visited.append((self.tx, self.ty))
+				print(f"Visited pillar at ({self.tx:.2f}, {self.ty:.2f}), total: {len(self.visited)}")
 				self.have_target = False
 				self.escaping = True
 				self.escape_counter = 0
 				# Start the escape maneuver immediately
-				cmd.linear.x = -0.2
-				cmd.angular.z = 0.8
+				cmd.linear.x = -0.25
+				cmd.angular.z = 0.6
 		else:
 			# Exploration mode - wall following
 			left_min = min(msg.ranges[0:90])
