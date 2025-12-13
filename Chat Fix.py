@@ -113,8 +113,7 @@ class Project(Node):
 		# --- Escape state to prevent getting stuck ---
 		self.escaping = False
 		self.escape_counter = 0
-		self.ESCAPE_DURATION = 15  # Shorter escape
-		self.escape_angle = 0.0  # Direction to escape towards
+		self.ESCAPE_DURATION = 20
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -219,22 +218,15 @@ class Project(Node):
 		
 		cmd = Twist()
 		
-		# Handle escape mode first
+		# Handle escape mode first - prioritize escaping over everything
 		if self.escaping:
 			self.escape_counter += 1
 			if self.escape_counter < self.ESCAPE_DURATION:
-				# Move away from the pillar in the escape direction
-				cmd.linear.x = 0.3  # Drive forward away from pillar
-				
-				# Turn towards escape angle
-				angle_error = math.atan2(
-					math.sin(self.escape_angle - self.yaw),
-					math.cos(self.escape_angle - self.yaw)
-				)
-				cmd.angular.z = 2.0 * angle_error
-				
+				# Simple escape: back up while turning
+				cmd.linear.x = -0.2
+				cmd.angular.z = 0.7
 				self.cmd_pub.publish(cmd)
-				return
+				return  # Skip all other logic while escaping
 			else:
 				# Done escaping
 				self.escaping = False
@@ -248,11 +240,41 @@ class Project(Node):
 			xw, yw = self.cluster_to_world(cluster, msg)
 			if not self.is_visited(xw, yw):
 				dist = math.hypot(xw - self.x, yw - self.y)
-				targets.append((dist, xw, yw))
+				
+				# Check if path to this pillar goes near any visited pillars
+				path_clear = True
+				for vx, vy in self.visited:
+					# Check distance from visited pillar to line between robot and target
+					# Simple approximation: check if visited pillar is close to target direction
+					dx_target = xw - self.x
+					dy_target = yw - self.y
+					dx_visited = vx - self.x
+					dy_visited = vy - self.y
+					
+					# If visited pillar is in roughly the same direction and close
+					target_dist = math.hypot(dx_target, dy_target)
+					visited_dist = math.hypot(dx_visited, dy_visited)
+					
+					if visited_dist < target_dist:  # Visited pillar is between us and target
+						# Check if it's in the way
+						angle_to_target = math.atan2(dy_target, dx_target)
+						angle_to_visited = math.atan2(dy_visited, dy_visited)
+						angle_diff = abs(math.atan2(
+							math.sin(angle_to_target - angle_to_visited),
+							math.cos(angle_to_target - angle_to_visited)
+						))
+						
+						# If visited pillar is less than 30 degrees off our path and close
+						if angle_diff < 0.5 and visited_dist < 1.0:
+							path_clear = False
+							break
+				
+				if path_clear:
+					targets.append((dist, xw, yw))
 		
 		# Debug: print visited and detected pillars
 		if len(targets) > 0 or len(pillars) > len(targets):
-			print(f"Detected {len(pillars)} pillars, {len(targets)} unvisited, {len(self.visited)} total visited")
+			print(f"Detected {len(pillars)} pillars, {len(targets)} with clear paths, {len(self.visited)} visited")
 		
 		if targets:
 			targets.sort()
