@@ -105,7 +105,7 @@ class Project(Node):
 		
 		# --- Pillar targeting state ---
 		self.visited = []
-		self.visit_radius = 0.75  # Increased from 0.6 to better filter visited pillars
+		self.visit_radius = 0.7  # Back to reasonable value
 		self.have_target = False
 		self.tx = 0.0
 		self.ty = 0.0
@@ -113,13 +113,8 @@ class Project(Node):
 		# --- Escape state to prevent getting stuck ---
 		self.escaping = False
 		self.escape_counter = 0
-		self.ESCAPE_DURATION = 20  # Number of scan callbacks to escape (increased)
-		
-		# --- Search mode when no pillars visible ---
-		self.searching = False
-		self.search_counter = 0
-		self.SEARCH_DURATION = 40  # How long to search before giving up
-		self.search_turn_direction = 1  # 1 or -1 for turn direction
+		self.ESCAPE_DURATION = 15  # Shorter escape
+		self.escape_angle = 0.0  # Direction to escape towards
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -228,17 +223,22 @@ class Project(Node):
 		if self.escaping:
 			self.escape_counter += 1
 			if self.escape_counter < self.ESCAPE_DURATION:
-				# Back up and turn to clear the area
-				cmd.linear.x = -0.25
-				cmd.angular.z = 0.6
+				# Move away from the pillar in the escape direction
+				cmd.linear.x = 0.3  # Drive forward away from pillar
+				
+				# Turn towards escape angle
+				angle_error = math.atan2(
+					math.sin(self.escape_angle - self.yaw),
+					math.cos(self.escape_angle - self.yaw)
+				)
+				cmd.angular.z = 2.0 * angle_error
+				
 				self.cmd_pub.publish(cmd)
 				return
 			else:
-				# Done escaping, now search for new targets
+				# Done escaping
 				self.escaping = False
 				self.escape_counter = 0
-				self.searching = True
-				self.search_counter = 0
 		
 		# Normal pillar detection and targeting
 		pillars = self.detect_pillars(msg)
@@ -250,12 +250,14 @@ class Project(Node):
 				dist = math.hypot(xw - self.x, yw - self.y)
 				targets.append((dist, xw, yw))
 		
+		# Debug: print visited and detected pillars
+		if len(targets) > 0 or len(pillars) > len(targets):
+			print(f"Detected {len(pillars)} pillars, {len(targets)} unvisited, {len(self.visited)} total visited")
+		
 		if targets:
 			targets.sort()
 			_, self.tx, self.ty = targets[0]
 			self.have_target = True
-			self.searching = False  # Found a target, stop searching
-			self.search_counter = 0
 		else:
 			self.have_target = False
 		
