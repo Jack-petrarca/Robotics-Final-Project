@@ -125,7 +125,7 @@ class Project(Node):
 		# --- Exploration when no target ---
 		self.explore_direction = 0.0
 		self.explore_timer = 0
-		self.spiral_radius = 2.0  # For spiral exploration
+		self.last_collect_time = 0
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -217,6 +217,13 @@ class Project(Node):
 			if math.hypot(x - vx, y - vy) < self.visit_radius:
 				return True
 		return False
+	
+	def get_min_front_distance(self, msg):
+		"""Get minimum distance in front of robot"""
+		# Check front 60 degrees (30 degrees on each side)
+		front_indices = list(range(150, 210))
+		front_ranges = [msg.ranges[i] for i in front_indices if i < len(msg.ranges)]
+		return min(front_ranges) if front_ranges else msg.range_max
 		
 	def scan_cbk(self, msg):
 		beta = msg.angle_increment
@@ -248,6 +255,9 @@ class Project(Node):
 		self.map.show_map()
 		
 		cmd = Twist()
+		
+		# Get obstacle info for safety
+		min_front_dist = self.get_min_front_distance(msg)
 		
 		# Detect pillars
 		pillars = self.detect_pillars(msg)
@@ -283,18 +293,45 @@ class Project(Node):
 			
 			# Collection radius: within 50cm counts as visited
 			COLLECTION_RADIUS = 0.50
+			SAFETY_STOP_DISTANCE = 0.30  # Stop before hitting pillar
 			
-			if dist > COLLECTION_RADIUS:
-				# Approaching target
-				# Adaptive speed based on alignment
+			# CRITICAL: Emergency obstacle avoidance
+			if min_front_dist < 0.25:
+				# Too close to obstacle! Stop immediately
+				cmd.linear.x = 0.0
+				cmd.angular.z = 0.0
+				
+				# Mark as collected if we're close to target
+				if dist < COLLECTION_RADIUS and not self.is_visited(self.tx, self.ty):
+					self.visited.append((self.tx, self.ty))
+					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
+					print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) - Time: {self.elapsed:.1f}s")
+					self.have_target = False
+					self.last_collect_time = self.elapsed
+			
+			elif dist > COLLECTION_RADIUS:
+				# Still approaching target
+				
+				# Slow down as we get closer
+				if dist > 1.5:
+					base_speed = 0.4
+				elif dist > 0.8:
+					base_speed = 0.3
+				else:
+					base_speed = 0.2
+				
+				# Slow down even more if obstacle is close
+				if min_front_dist < 0.5:
+					base_speed = min(base_speed, 0.15)
+				
+				# Reduce speed if not well aligned
 				if abs(angle_error) > 0.5:
-					# Need to turn more
-					cmd.linear.x = 0.2
+					cmd.linear.x = 0.15
 					cmd.angular.z = 2.0 * angle_error
 				else:
-					# Well aligned, move faster
-					cmd.linear.x = 0.5
+					cmd.linear.x = base_speed
 					cmd.angular.z = 1.5 * angle_error
+				
 			else:
 				# Within collection radius - mark as visited
 				cmd.linear.x = 0.0
@@ -304,6 +341,7 @@ class Project(Node):
 					self.visited.append((self.tx, self.ty))
 					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
 					print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) - Time: {self.elapsed:.1f}s")
+					self.last_collect_time = self.elapsed
 				
 				self.have_target = False
 				self.explore_timer = 0  # Reset exploration
@@ -318,34 +356,64 @@ class Project(Node):
 			right_min = min(msg.ranges[225:315]) if len(msg.ranges) > 315 else msg.range_max
 			
 			# Obstacle avoidance threshold
-			OBSTACLE_THRESHOLD = 0.6
+			OBSTACLE_THRESHOLD = 0.7
 			
-			if front_min < OBSTACLE_THRESHOLD:
+			# Emergency stop for very close obstacles
+			if min_front_dist < 0.3:
+				cmd.linear.x = 0.0
+				if left_min > right_min:
+					cmd.angular.z = 1.0  # Turn left
+				else:
+					cmd.angular.z = -1.0  # Turn right
+			
+			elif front_min < OBSTACLE_THRESHOLD:
 				# Obstacle ahead - turn towards more open side
 				if left_min > right_min:
 					self.explore_direction = self.yaw + math.pi / 3  # Turn left
 				else:
 					self.explore_direction = self.yaw - math.pi / 3  # Turn right
 				self.explore_timer = 0
-			elif self.explore_timer > 30:
+				
+				# Slow turn
+				angle_error = math.atan2(
+					math.sin(self.explore_direction - self.yaw),
+					math.cos(self.explore_direction - self.yaw)
+				)
+				cmd.linear.x = 0.15
+				cmd.angular.z = 1.0 * angle_error
+				
+			elif self.explore_timer > 40:
 				# Been exploring same direction too long, pick new direction
-				# Spiral outward strategy
 				self.explore_direction = self.yaw + math.pi / 2
 				self.explore_timer = 0
-			elif self.explore_timer == 0:
-				# Just finished collecting, pick a new explore direction
-				# Try to explore in a systematic way
-				self.explore_direction = self.yaw + math.pi / 4
-			
-			# Navigate towards exploration direction
-			angle_error = math.atan2(
-				math.sin(self.explore_direction - self.yaw),
-				math.cos(self.explore_direction - self.yaw)
-			)
-			
-			# Faster exploration
-			cmd.linear.x = 0.5
-			cmd.angular.z = 1.2 * angle_error
+				
+				angle_error = math.atan2(
+					math.sin(self.explore_direction - self.yaw),
+					math.cos(self.explore_direction - self.yaw)
+				)
+				cmd.linear.x = 0.3
+				cmd.angular.z = 1.2 * angle_error
+				
+			else:
+				# Navigate towards exploration direction
+				if self.explore_timer == 0:
+					# Just finished collecting, pick strategic direction
+					self.explore_direction = self.yaw + math.pi / 4
+				
+				angle_error = math.atan2(
+					math.sin(self.explore_direction - self.yaw),
+					math.cos(self.explore_direction - self.yaw)
+				)
+				
+				# Moderate exploration speed with obstacle awareness
+				if min_front_dist > 1.5:
+					cmd.linear.x = 0.4
+				elif min_front_dist > 1.0:
+					cmd.linear.x = 0.3
+				else:
+					cmd.linear.x = 0.2
+					
+				cmd.angular.z = 1.2 * angle_error
 		
 		self.cmd_pub.publish(cmd)
 
