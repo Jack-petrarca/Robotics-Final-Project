@@ -122,6 +122,11 @@ class Project(Node):
 		self.tx = 0.0
 		self.ty = 0.0
 		
+		# --- Prevent immediate re-targeting after collection ---
+		self.just_collected = False
+		self.cooldown_counter = 0
+		self.COOLDOWN_DURATION = 15  # Number of callbacks to ignore targets after collection
+		
 		self.starttime = 0.0
 		self.elapsed = 0.0
 		self.started = False
@@ -220,6 +225,27 @@ class Project(Node):
 			self.map.insert_ray(vm, um, v, u, occupied)
 			i += 1
 		
+		self.map.show_map()
+		
+		cmd = Twist()
+		
+		# Handle cooldown after collection
+		if self.just_collected:
+			self.cooldown_counter += 1
+			if self.cooldown_counter < self.COOLDOWN_DURATION:
+				# Just do wall following during cooldown
+				left_min = min(msg.ranges[0:90])
+				right_min = min(msg.ranges[270:360])
+				cmd.linear.x = 0.4
+				cmd.angular.z = 0.3 * (left_min - right_min)
+				self.cmd_pub.publish(cmd)
+				return
+			else:
+				# Cooldown over
+				self.just_collected = False
+				self.cooldown_counter = 0
+		
+		# Detect pillars only if not in cooldown
 		pillars = self.detect_pillars(msg)
 		
 		targets = []
@@ -236,10 +262,6 @@ class Project(Node):
 		else:
 			self.have_target = False
 		
-		self.map.show_map()
-		
-		cmd = Twist()
-		
 		if self.have_target:
 			dx = self.tx - self.x
 			dy = self.ty - self.y
@@ -252,22 +274,24 @@ class Project(Node):
 			)
 			
 			COLLECT_RADIUS = 0.50
-			STOP_RADIUS = 0.49
 			
 			cmd.angular.z = 1.5 * angle_error
 			
 			if dist > COLLECT_RADIUS:
 				cmd.linear.x = 0.3
 			
-			elif STOP_RADIUS <= dist <= COLLECT_RADIUS:
-				cmd.linear.x = 0.0
-				self.visited.append((self.tx, self.ty))
-				self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
-				print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f})")
-				self.have_target = False
-			
 			else:
-				cmd.linear.x = -0.1
+				# Within collection radius - mark as visited FIRST
+				if not self.is_visited(self.tx, self.ty):
+					self.visited.append((self.tx, self.ty))
+					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
+					print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f})")
+					# Enter cooldown mode
+					self.just_collected = True
+					self.cooldown_counter = 0
+				
+				self.have_target = False
+				cmd.linear.x = 0.0
 
 		else:
 			left_min = min(msg.ranges[0:90])
