@@ -115,6 +115,12 @@ class Project(Node):
 		self.escape_counter = 0
 		self.ESCAPE_DURATION = 20  # Number of scan callbacks to escape (increased)
 		
+		# --- Search mode when no pillars visible ---
+		self.searching = False
+		self.search_counter = 0
+		self.SEARCH_DURATION = 40  # How long to search before giving up
+		self.search_turn_direction = 1  # 1 or -1 for turn direction
+		
 		self.starttime = 0.0
 		self.elapsed = 0.0
 		self.started = False
@@ -228,9 +234,11 @@ class Project(Node):
 				self.cmd_pub.publish(cmd)
 				return
 			else:
-				# Done escaping
+				# Done escaping, now search for new targets
 				self.escaping = False
 				self.escape_counter = 0
+				self.searching = True
+				self.search_counter = 0
 		
 		# Normal pillar detection and targeting
 		pillars = self.detect_pillars(msg)
@@ -246,6 +254,8 @@ class Project(Node):
 			targets.sort()
 			_, self.tx, self.ty = targets[0]
 			self.have_target = True
+			self.searching = False  # Found a target, stop searching
+			self.search_counter = 0
 		else:
 			self.have_target = False
 		
@@ -276,12 +286,35 @@ class Project(Node):
 				# Start the escape maneuver immediately
 				cmd.linear.x = -0.25
 				cmd.angular.z = 0.6
+		
+		elif self.searching:
+			# Active search mode - spin in place to look for pillars
+			self.search_counter += 1
+			if self.search_counter < self.SEARCH_DURATION:
+				print(f"Searching for pillars... {self.search_counter}/{self.SEARCH_DURATION}")
+				cmd.linear.x = 0.0
+				cmd.angular.z = 0.8 * self.search_turn_direction
+			else:
+				# Done searching, switch to exploration mode
+				print("Search complete, switching to exploration")
+				self.searching = False
+				self.search_counter = 0
+				# Alternate turn direction for next search
+				self.search_turn_direction *= -1
+
 		else:
-			# Exploration mode - wall following
+			# Exploration mode - move forward while avoiding walls
 			left_min = min(msg.ranges[0:90])
 			right_min = min(msg.ranges[270:360])
-			cmd.linear.x = 0.4
-			cmd.angular.z = 0.25 * (left_min - right_min)
+			front_min = min(msg.ranges[165:195])  # Check front
+			
+			# If obstacle ahead, turn more aggressively
+			if front_min < 0.5:
+				cmd.linear.x = 0.1
+				cmd.angular.z = 1.0 if left_min > right_min else -1.0
+			else:
+				cmd.linear.x = 0.4
+				cmd.angular.z = 0.25 * (left_min - right_min)
 		
 		self.cmd_pub.publish(cmd)
 
