@@ -121,8 +121,8 @@ class Project(Node):
 		self.have_target = False
 		self.tx = 0.0
 		self.ty = 0.0
-		self.approaching_target = False
-		self.approach_start_dist = 0.0
+		self.stuck_counter = 0  # Detect when stuck
+		self.last_position = (0.0, 0.0)
 		
 		# --- Exploration when no target ---
 		self.explore_direction = 0.0
@@ -213,18 +213,24 @@ class Project(Node):
 		return False
 	
 	def get_min_front_distance(self, msg):
-		"""Get minimum distance in front of robot (wide angle)"""
-		# Check front 90 degrees (45 degrees on each side)
-		front_indices = list(range(135, 225))
+		"""Get minimum distance in front of robot"""
+		# Check front 60 degrees
+		front_indices = list(range(150, 210))
 		front_ranges = [msg.ranges[i] for i in front_indices if i < len(msg.ranges)]
 		return min(front_ranges) if front_ranges else msg.range_max
 	
-	def get_min_narrow_front(self, msg):
-		"""Get minimum distance directly in front (narrow angle)"""
-		# Check front 30 degrees
-		front_indices = list(range(165, 195))
-		front_ranges = [msg.ranges[i] for i in front_indices if i < len(msg.ranges)]
-		return min(front_ranges) if front_ranges else msg.range_max
+	def is_stuck(self):
+		"""Detect if robot is stuck (not moving)"""
+		dist_moved = math.hypot(self.x - self.last_position[0], self.y - self.last_position[1])
+		
+		if dist_moved < 0.05:  # Moved less than 5cm
+			self.stuck_counter += 1
+		else:
+			self.stuck_counter = 0
+		
+		self.last_position = (self.x, self.y)
+		
+		return self.stuck_counter > 20  # Stuck for 2 seconds (20 * 0.1s)
 		
 	def scan_cbk(self, msg):
 		beta = msg.angle_increment
@@ -259,7 +265,17 @@ class Project(Node):
 		
 		# Get obstacle info for safety
 		min_front_dist = self.get_min_front_distance(msg)
-		min_narrow_front = self.get_min_narrow_front(msg)
+		
+		# Check if stuck
+		if self.is_stuck():
+			print(f"⚠ Robot stuck! Attempting recovery...")
+			# Recovery: turn and abandon current target
+			cmd.linear.x = 0.0
+			cmd.angular.z = 1.0
+			self.have_target = False
+			self.stuck_counter = 0
+			self.cmd_pub.publish(cmd)
+			return
 		
 		# Detect pillars
 		pillars = self.detect_pillars(msg)
@@ -275,38 +291,12 @@ class Project(Node):
 		# Update target (choose closest unvisited pillar)
 		if targets:
 			targets.sort()
-			_, new_tx, new_ty = targets[0]
-			
-			# Only update target if it's different or we don't have one
-			if not self.have_target or (abs(new_tx - self.tx) > 0.1 or abs(new_ty - self.ty) > 0.1):
-				self.tx = new_tx
-				self.ty = new_ty
-				self.have_target = True
-				self.approaching_target = False
+			_, self.tx, self.ty = targets[0]
+			self.have_target = True
 		else:
 			self.have_target = False
-			self.approaching_target = False
 		
 		# === MAIN CONTROL LOGIC ===
-		
-		# ABSOLUTE EMERGENCY STOP - highest priority
-		if min_narrow_front < 0.35:
-			cmd.linear.x = 0.0
-			cmd.angular.z = 0.0
-			
-			# If we have a target and we're very close, collect it
-			if self.have_target:
-				dist_to_target = math.hypot(self.tx - self.x, self.ty - self.y)
-				if dist_to_target < 0.50 and not self.is_visited(self.tx, self.ty):
-					self.visited.append((self.tx, self.ty))
-					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
-					print(f"✓ COLLECTED #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) [STOPPED] - Time: {self.elapsed:.1f}s")
-					self.have_target = False
-					self.approaching_target = False
-			
-			self.cmd_pub.publish(cmd)
-			return
-		
 		if self.have_target:
 			# Navigate to target pillar
 			dx = self.tx - self.x
@@ -321,11 +311,28 @@ class Project(Node):
 			
 			# Collection parameters
 			COLLECTION_RADIUS = 0.50  # Success distance
-			APPROACH_DISTANCE = 0.60   # Start careful approach
+			STOP_THRESHOLD = 0.35     # Emergency stop distance
 			
-			# Check if we've reached collection distance
-			if dist <= COLLECTION_RADIUS:
-				# SUCCESS - Stop and mark as visited
+			# Emergency stop if obstacle very close
+			if min_front_dist < STOP_THRESHOLD:
+				cmd.linear.x = 0.0
+				cmd.angular.z = 0.0
+				
+				# If close to target, collect it
+				if dist < 0.55 and not self.is_visited(self.tx, self.ty):
+					self.visited.append((self.tx, self.ty))
+					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
+					print(f"✓ COLLECTED #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) [EMERGENCY STOP] - Time: {self.elapsed:.1f}s")
+					self.have_target = False
+				else:
+					# Give up on this target if we can't reach it
+					if self.stuck_counter > 15:
+						print(f"✗ Abandoning unreachable target at ({self.tx:.2f}, {self.ty:.2f})")
+						self.have_target = False
+						self.stuck_counter = 0
+			
+			# Reached collection distance
+			elif dist <= COLLECTION_RADIUS:
 				cmd.linear.x = 0.0
 				cmd.angular.z = 0.0
 				
@@ -335,103 +342,82 @@ class Project(Node):
 					print(f"✓ COLLECTED #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) - Time: {self.elapsed:.1f}s")
 				
 				self.have_target = False
-				self.approaching_target = False
 				self.explore_timer = 0
 			
-			# Obstacle too close - abort approach
-			elif min_narrow_front < 0.40:
-				cmd.linear.x = 0.0
-				cmd.angular.z = 0.0
-				
-				# If close enough, still count it
-				if dist < 0.55 and not self.is_visited(self.tx, self.ty):
-					self.visited.append((self.tx, self.ty))
-					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
-					print(f"✓ COLLECTED #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) [OBSTACLE] - Time: {self.elapsed:.1f}s")
-					self.have_target = False
-					self.approaching_target = False
-			
-			# Very close approach - ultra careful
-			elif dist <= APPROACH_DISTANCE:
-				self.approaching_target = True
-				
-				# Only move if well-aligned AND obstacle not too close
-				if abs(angle_error) < 0.3 and min_narrow_front > 0.45:
-					cmd.linear.x = 0.08  # Very slow approach
-					cmd.angular.z = 1.0 * angle_error
+			# Final approach - very careful
+			elif dist <= 0.70:
+				# Only move if well-aligned
+				if abs(angle_error) < 0.25 and min_front_dist > 0.40:
+					cmd.linear.x = 0.12  # Slow final approach
+					cmd.angular.z = 1.2 * angle_error
 				else:
-					# Just rotate in place
+					# Rotate to align
 					cmd.linear.x = 0.0
 					cmd.angular.z = 1.5 * angle_error
 			
-			# Medium distance - careful approach
-			elif dist <= 1.0:
-				# Slow down significantly
+			# Medium distance
+			elif dist <= 1.5:
 				if abs(angle_error) > 0.4:
-					cmd.linear.x = 0.10
+					# Turn more
+					cmd.linear.x = 0.15
 					cmd.angular.z = 1.8 * angle_error
 				else:
-					# Only proceed if path is clear
-					if min_front_dist > 0.6:
-						cmd.linear.x = 0.18
-						cmd.angular.z = 1.2 * angle_error
+					# Move forward with caution
+					if min_front_dist > 0.7:
+						cmd.linear.x = 0.25
 					else:
-						cmd.linear.x = 0.10
-						cmd.angular.z = 1.2 * angle_error
+						cmd.linear.x = 0.15
+					cmd.angular.z = 1.3 * angle_error
 			
-			# Far distance - normal approach
+			# Far distance
 			else:
 				if abs(angle_error) > 0.5:
-					# Need to turn more
-					cmd.linear.x = 0.12
+					cmd.linear.x = 0.18
 					cmd.angular.z = 2.0 * angle_error
 				else:
-					# Adjust speed based on obstacles
-					if min_front_dist > 1.5:
-						cmd.linear.x = 0.30
+					# Speed based on clearance
+					if min_front_dist > 2.0:
+						cmd.linear.x = 0.35
 					elif min_front_dist > 1.0:
-						cmd.linear.x = 0.22
-					elif min_front_dist > 0.7:
-						cmd.linear.x = 0.15
+						cmd.linear.x = 0.28
 					else:
-						cmd.linear.x = 0.10
-					
-					cmd.angular.z = 1.5 * angle_error
+						cmd.linear.x = 0.20
+					cmd.angular.z = 1.4 * angle_error
 		
 		else:
 			# No visible unvisited pillars - explore
 			self.explore_timer += 1
 			
 			# Get obstacle information
-			front_min = min_front_dist
 			left_min = min(msg.ranges[45:135]) if len(msg.ranges) > 135 else msg.range_max
 			right_min = min(msg.ranges[225:315]) if len(msg.ranges) > 315 else msg.range_max
 			
-			# Critical obstacle avoidance
-			if front_min < 0.5:
+			# Obstacle avoidance
+			if min_front_dist < 0.5:
 				# Turn away from obstacle
 				if left_min > right_min:
-					cmd.angular.z = 0.8  # Turn left
+					cmd.angular.z = 1.0  # Turn left
 				else:
-					cmd.angular.z = -0.8  # Turn right
+					cmd.angular.z = -1.0  # Turn right
 				cmd.linear.x = 0.0
+				self.explore_timer = 0
 			
-			elif front_min < 0.8:
-				# Obstacle ahead - pick new direction
+			elif min_front_dist < 1.0:
+				# Pick new explore direction
 				if left_min > right_min:
 					self.explore_direction = self.yaw + math.pi / 3
 				else:
 					self.explore_direction = self.yaw - math.pi / 3
-				self.explore_timer = 0
 				
 				angle_error = math.atan2(
 					math.sin(self.explore_direction - self.yaw),
 					math.cos(self.explore_direction - self.yaw)
 				)
-				cmd.linear.x = 0.12
-				cmd.angular.z = 1.0 * angle_error
+				cmd.linear.x = 0.18
+				cmd.angular.z = 1.2 * angle_error
+				self.explore_timer = 0
 			
-			elif self.explore_timer > 50:
+			elif self.explore_timer > 40:
 				# Change direction periodically
 				self.explore_direction = self.yaw + math.pi / 2.5
 				self.explore_timer = 0
@@ -439,22 +425,20 @@ class Project(Node):
 			else:
 				# Normal exploration
 				if self.explore_timer == 0:
-					self.explore_direction = self.yaw + math.pi / 4
+					self.explore_direction = self.yaw + math.pi / 6
 				
 				angle_error = math.atan2(
 					math.sin(self.explore_direction - self.yaw),
 					math.cos(self.explore_direction - self.yaw)
 				)
 				
-				# Conservative exploration speed
-				if front_min > 2.0:
-					cmd.linear.x = 0.30
-				elif front_min > 1.5:
-					cmd.linear.x = 0.25
-				elif front_min > 1.0:
-					cmd.linear.x = 0.20
+				# Exploration speed
+				if min_front_dist > 2.0:
+					cmd.linear.x = 0.35
+				elif min_front_dist > 1.5:
+					cmd.linear.x = 0.28
 				else:
-					cmd.linear.x = 0.15
+					cmd.linear.x = 0.22
 				
 				cmd.angular.z = 1.0 * angle_error
 		
