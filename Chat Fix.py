@@ -105,15 +105,15 @@ class Project(Node):
 		
 		# --- Pillar targeting state ---
 		self.visited = []
-		self.visit_radius = 0.7  # Back to reasonable value
+		self.visit_radius = 0.65
 		self.have_target = False
 		self.tx = 0.0
 		self.ty = 0.0
 		
-		# --- Escape state to prevent getting stuck ---
-		self.escaping = False
-		self.escape_counter = 0
-		self.ESCAPE_DURATION = 20
+		# --- Spiral navigation parameters ---
+		self.spiral_mode = True
+		self.base_speed = 0.35
+		self.spiral_turn_rate = 0.15  # Gentle constant turn for spiral
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -140,7 +140,6 @@ class Project(Node):
 			self.starttime = msg.header.stamp.sec
 			
 		self.elapsed = msg.header.stamp.sec - self.starttime
-		print("elapsed", self.elapsed)
 		
 	def detect_pillars(self, msg):
 		pillars = []
@@ -216,129 +215,87 @@ class Project(Node):
 		
 		self.map.show_map()
 		
-		cmd = Twist()
-		
-		# Handle escape mode first - prioritize escaping over everything
-		if self.escaping:
-			self.escape_counter += 1
-			if self.escape_counter < self.ESCAPE_DURATION:
-				# Simple escape: back up while turning
-				cmd.linear.x = -0.2
-				cmd.angular.z = 0.7
-				self.cmd_pub.publish(cmd)
-				return  # Skip all other logic while escaping
-			else:
-				# Done escaping
-				self.escaping = False
-				self.escape_counter = 0
-		
-		# Normal pillar detection and targeting
+		# Detect pillars for opportunistic collection
 		pillars = self.detect_pillars(msg)
-		
 		targets = []
 		for cluster in pillars:
 			xw, yw = self.cluster_to_world(cluster, msg)
 			if not self.is_visited(xw, yw):
 				dist = math.hypot(xw - self.x, yw - self.y)
-				
-				# Check if path to this pillar goes near any visited pillars
-				path_clear = True
-				for vx, vy in self.visited:
-					# Check distance from visited pillar to line between robot and target
-					# Simple approximation: check if visited pillar is close to target direction
-					dx_target = xw - self.x
-					dy_target = yw - self.y
-					dx_visited = vx - self.x
-					dy_visited = vy - self.y
-					
-					# If visited pillar is in roughly the same direction and close
-					target_dist = math.hypot(dx_target, dy_target)
-					visited_dist = math.hypot(dx_visited, dy_visited)
-					
-					if visited_dist < target_dist:  # Visited pillar is between us and target
-						# Check if it's in the way
-						angle_to_target = math.atan2(dy_target, dx_target)
-						angle_to_visited = math.atan2(dy_visited, dy_visited)
-						angle_diff = abs(math.atan2(
-							math.sin(angle_to_target - angle_to_visited),
-							math.cos(angle_to_target - angle_to_visited)
-						))
-						
-						# If visited pillar is less than 30 degrees off our path and close
-						if angle_diff < 0.5 and visited_dist < 1.0:
-							path_clear = False
-							break
-				
-				if path_clear:
-					targets.append((dist, xw, yw))
+				targets.append((dist, xw, yw))
 		
-		# Debug: print visited and detected pillars
-		if len(targets) > 0 or len(pillars) > len(targets):
-			print(f"Detected {len(pillars)} pillars, {len(targets)} with clear paths, {len(self.visited)} visited")
-		
+		# Check for close unvisited pillars
+		close_pillar = False
 		if targets:
 			targets.sort()
-			_, self.tx, self.ty = targets[0]
-			self.have_target = True
+			closest_dist, self.tx, self.ty = targets[0]
+			if closest_dist < 1.5:  # If pillar is close, go for it
+				self.have_target = True
+				close_pillar = True
+			else:
+				self.have_target = False
 		else:
 			self.have_target = False
 		
-		if self.have_target:
+		cmd = Twist()
+		
+		# Check boundaries - turn away from walls
+		near_boundary = False
+		BOUNDARY_MARGIN = 1.0
+		if abs(self.x) > 10.0 - BOUNDARY_MARGIN or abs(self.y) > 10.0 - BOUNDARY_MARGIN:
+			near_boundary = True
+		
+		# Get obstacle distances
+		front_min = min(msg.ranges[165:195]) if len(msg.ranges) > 195 else msg.range_max
+		left_min = min(msg.ranges[45:135]) if len(msg.ranges) > 135 else msg.range_max
+		right_min = min(msg.ranges[225:315]) if len(msg.ranges) > 315 else msg.range_max
+		
+		# Priority 1: Collect close pillars
+		if self.have_target and close_pillar:
 			dx = self.tx - self.x
 			dy = self.ty - self.y
 			dist = math.hypot(dx, dy)
 			
-			target_angle = math.atan2(dy, dx)
-			angle_error = math.atan2(
-				math.sin(target_angle - self.yaw),
-				math.cos(target_angle - self.yaw)
-			)
-			
-			COLLECT_RADIUS = 0.50
-			
-			if dist > COLLECT_RADIUS:
-				# Approaching the pillar
-				cmd.angular.z = 1.5 * angle_error
-				cmd.linear.x = 0.3
-			else:
-				# Within collection radius - mark as visited FIRST, then escape
+			if dist < 0.52:  # Collected
 				self.visited.append((self.tx, self.ty))
-				print(f"Visited pillar at ({self.tx:.2f}, {self.ty:.2f}), total: {len(self.visited)}")
+				print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f})")
 				self.have_target = False
-				self.escaping = True
-				self.escape_counter = 0
-				# Start the escape maneuver immediately
-				cmd.linear.x = -0.25
-				cmd.angular.z = 0.6
+			else:
+				# Drive towards pillar
+				target_angle = math.atan2(dy, dx)
+				angle_error = math.atan2(
+					math.sin(target_angle - self.yaw),
+					math.cos(target_angle - self.yaw)
+				)
+				cmd.angular.z = 2.0 * angle_error
+				cmd.linear.x = 0.3
 		
-		elif self.searching:
-			# Active search mode - spin in place to look for pillars
-			self.search_counter += 1
-			if self.search_counter < self.SEARCH_DURATION:
-				print(f"Searching for pillars... {self.search_counter}/{self.SEARCH_DURATION}")
-				cmd.linear.x = 0.0
-				cmd.angular.z = 0.8 * self.search_turn_direction
-			else:
-				# Done searching, switch to exploration mode
-				print("Search complete, switching to exploration")
-				self.searching = False
-				self.search_counter = 0
-				# Alternate turn direction for next search
-				self.search_turn_direction *= -1
-
+		# Priority 2: Avoid obstacles
+		elif front_min < 0.4:
+			cmd.linear.x = 0.0
+			# Turn towards more open side
+			cmd.angular.z = 1.2 if left_min > right_min else -1.2
+		
+		# Priority 3: Stay in bounds
+		elif near_boundary:
+			# Turn towards center
+			angle_to_center = math.atan2(-self.y, -self.x)
+			angle_error = math.atan2(
+				math.sin(angle_to_center - self.yaw),
+				math.cos(angle_to_center - self.yaw)
+			)
+			cmd.linear.x = 0.2
+			cmd.angular.z = 1.5 * angle_error
+		
+		# Priority 4: Spiral exploration
 		else:
-			# Exploration mode - move forward while avoiding walls
-			left_min = min(msg.ranges[0:90])
-			right_min = min(msg.ranges[270:360])
-			front_min = min(msg.ranges[165:195])  # Check front
+			# Gentle spiral - constant forward with slight turn
+			cmd.linear.x = self.base_speed
+			cmd.angular.z = self.spiral_turn_rate
 			
-			# If obstacle ahead, turn more aggressively
-			if front_min < 0.5:
-				cmd.linear.x = 0.1
-				cmd.angular.z = 1.0 if left_min > right_min else -1.0
-			else:
-				cmd.linear.x = 0.4
-				cmd.angular.z = 0.25 * (left_min - right_min)
+			# Adjust turn rate based on distance from center (tighter spiral further out)
+			dist_from_center = math.hypot(self.x, self.y)
+			cmd.angular.z = self.spiral_turn_rate * (1.0 + dist_from_center / 10.0)
 		
 		self.cmd_pub.publish(cmd)
 
