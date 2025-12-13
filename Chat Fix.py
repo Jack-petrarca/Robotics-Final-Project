@@ -275,9 +275,9 @@ class Project(Node):
 			
 			COLLECT_RADIUS = 0.50
 			
-			cmd.angular.z = 1.5 * angle_error
-			
 			if dist > COLLECT_RADIUS:
+				# Approaching the pillar
+				cmd.angular.z = 1.5 * angle_error
 				cmd.linear.x = 0.3
 			
 			else:
@@ -291,7 +291,9 @@ class Project(Node):
 					self.cooldown_counter = 0
 				
 				self.have_target = False
+				# Stop both linear and angular motion
 				cmd.linear.x = 0.0
+				cmd.angular.z = 0.0
 
 		else:
 			left_min = min(msg.ranges[0:90])
