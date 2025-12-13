@@ -274,14 +274,17 @@ class Project(Node):
 			)
 			
 			COLLECT_RADIUS = 0.50
+			STOP_RADIUS = 0.49
+			
+			# Always turn towards target
+			cmd.angular.z = 1.5 * angle_error
 			
 			if dist > COLLECT_RADIUS:
-				# Approaching the pillar
-				cmd.angular.z = 1.5 * angle_error
 				cmd.linear.x = 0.3
 			
-			else:
-				# Within collection radius - mark as visited FIRST
+			elif STOP_RADIUS <= dist <= COLLECT_RADIUS:
+				cmd.linear.x = 0.0
+				# Mark as visited FIRST before any other logic
 				if not self.is_visited(self.tx, self.ty):
 					self.visited.append((self.tx, self.ty))
 					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
@@ -289,11 +292,11 @@ class Project(Node):
 					# Enter cooldown mode
 					self.just_collected = True
 					self.cooldown_counter = 0
-				
 				self.have_target = False
-				# Stop both linear and angular motion
-				cmd.linear.x = 0.0
-				cmd.angular.z = 0.0
+			
+			else:
+				# Too close, back up
+				cmd.linear.x = -0.1
 
 		else:
 			left_min = min(msg.ranges[0:90])
