@@ -117,13 +117,15 @@ class Project(Node):
 		
 		# --- Pillar targeting state ---
 		self.visited = []
-		self.visit_radius = 0.65  # Slightly larger to prevent re-targeting
+		self.visit_radius = 0.55  # Detection radius for visited pillars
 		self.have_target = False
 		self.tx = 0.0
 		self.ty = 0.0
 		
 		# --- Exploration when no target ---
-		self.explore_direction = 0.0  # Direction to explore when no pillars visible
+		self.explore_direction = 0.0
+		self.explore_timer = 0
+		self.spiral_radius = 2.0  # For spiral exploration
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -152,29 +154,45 @@ class Project(Node):
 		self.elapsed = msg.header.stamp.sec - self.starttime
 		
 	def detect_pillars(self, msg):
+		"""Detect pillar clusters from LIDAR data"""
 		pillars = []
 		cluster = []
-		threshold = 0.15
+		threshold = 0.15  # Max distance between consecutive points in a cluster
 		
 		for i, r in enumerate(msg.ranges):
 			if r < msg.range_max:
 				if not cluster:
 					cluster = [(i, r)]
 				else:
-					if abs(r - cluster[-1][1]) < threshold:
+					# Check angular and distance continuity
+					prev_angle = msg.angle_min + cluster[-1][0] * msg.angle_increment
+					curr_angle = msg.angle_min + i * msg.angle_increment
+					
+					# Calculate expected distance at current angle based on previous point
+					angle_diff = abs(curr_angle - prev_angle)
+					expected_dist_diff = 2 * cluster[-1][1] * math.sin(angle_diff / 2)
+					
+					if abs(r - cluster[-1][1]) < threshold or expected_dist_diff < threshold:
 						cluster.append((i, r))
 					else:
-						if len(cluster) > 5:
+						# End current cluster
+						if len(cluster) > 5:  # Minimum cluster size
 							pillars.append(cluster)
 						cluster = [(i, r)]
 			else:
+				# End of valid range
 				if len(cluster) > 5:
 					pillars.append(cluster)
 				cluster = []
 		
+		# Don't forget last cluster
+		if len(cluster) > 5:
+			pillars.append(cluster)
+		
 		return pillars
 
 	def cluster_to_world(self, cluster, msg):
+		"""Convert cluster to world coordinates"""
 		indices = [i for i, r in cluster]
 		ranges = [r for i, r in cluster]
 		
@@ -183,15 +201,18 @@ class Project(Node):
 		
 		theta = msg.angle_min + i_mean * msg.angle_increment
 		
+		# Robot frame coordinates
 		xr = r_mean * math.cos(theta)
 		yr = r_mean * math.sin(theta)
 		
+		# World frame coordinates
 		xw = self.x + xr * math.cos(self.yaw) - yr * math.sin(self.yaw)
 		yw = self.y + xr * math.sin(self.yaw) + yr * math.cos(self.yaw)
 		
 		return xw, yw
 
 	def is_visited(self, x, y):
+		"""Check if a pillar location has been visited"""
 		for vx, vy in self.visited:
 			if math.hypot(x - vx, y - vy) < self.visit_radius:
 				return True
@@ -207,6 +228,7 @@ class Project(Node):
 						
 		vm, um = self.map.world2map(self.x, self.y)
 						
+		# Update map with LIDAR data
 		for r in msg.ranges:
 			theta_i = msg.angle_min + beta*i
 			if r < msg.range_max:
@@ -230,6 +252,7 @@ class Project(Node):
 		# Detect pillars
 		pillars = self.detect_pillars(msg)
 		
+		# Find unvisited targets
 		targets = []
 		for cluster in pillars:
 			xw, yw = self.cluster_to_world(cluster, msg)
@@ -237,6 +260,7 @@ class Project(Node):
 				dist = math.hypot(xw - self.x, yw - self.y)
 				targets.append((dist, xw, yw))
 		
+		# Update target (choose closest unvisited pillar)
 		if targets:
 			targets.sort()
 			_, self.tx, self.ty = targets[0]
@@ -244,7 +268,9 @@ class Project(Node):
 		else:
 			self.have_target = False
 		
+		# === MAIN CONTROL LOGIC ===
 		if self.have_target:
+			# Navigate to target pillar
 			dx = self.tx - self.x
 			dy = self.ty - self.y
 			dist = math.hypot(dx, dy)
@@ -255,49 +281,71 @@ class Project(Node):
 				math.cos(target_angle - self.yaw)
 			)
 			
-			COLLECT_RADIUS = 0.50
-			STOP_RADIUS = 0.49
+			# Collection radius: within 50cm counts as visited
+			COLLECTION_RADIUS = 0.50
 			
-			# Always turn towards target
-			cmd.angular.z = 1.5 * angle_error
-			
-			if dist > COLLECT_RADIUS:
-				cmd.linear.x = 0.3
-			
-			elif STOP_RADIUS <= dist <= COLLECT_RADIUS:
+			if dist > COLLECTION_RADIUS:
+				# Approaching target
+				# Adaptive speed based on alignment
+				if abs(angle_error) > 0.5:
+					# Need to turn more
+					cmd.linear.x = 0.2
+					cmd.angular.z = 2.0 * angle_error
+				else:
+					# Well aligned, move faster
+					cmd.linear.x = 0.5
+					cmd.angular.z = 1.5 * angle_error
+			else:
+				# Within collection radius - mark as visited
 				cmd.linear.x = 0.0
-				# Mark as visited FIRST before any other logic
+				cmd.angular.z = 0.0
+				
 				if not self.is_visited(self.tx, self.ty):
 					self.visited.append((self.tx, self.ty))
 					self.map.mark_visited_pillar(self.tx, self.ty, self.visit_radius)
-					print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f})")
+					print(f"✓ Collected pillar #{len(self.visited)} at ({self.tx:.2f}, {self.ty:.2f}) - Time: {self.elapsed:.1f}s")
+				
 				self.have_target = False
-			
-			else:
-				# Too close, back up
-				cmd.linear.x = -0.1
-
+				self.explore_timer = 0  # Reset exploration
+		
 		else:
-			# No target - explore by picking a direction and driving
+			# No visible unvisited pillars - explore
+			self.explore_timer += 1
+			
+			# Get obstacle information
 			front_min = min(msg.ranges[165:195]) if len(msg.ranges) > 195 else msg.range_max
+			left_min = min(msg.ranges[45:135]) if len(msg.ranges) > 135 else msg.range_max
+			right_min = min(msg.ranges[225:315]) if len(msg.ranges) > 315 else msg.range_max
 			
-			# If obstacle ahead, pick a new explore direction
-			if front_min < 0.5:
-				left_min = min(msg.ranges[0:90])
-				right_min = min(msg.ranges[270:360])
-				# Turn towards more open side
+			# Obstacle avoidance threshold
+			OBSTACLE_THRESHOLD = 0.6
+			
+			if front_min < OBSTACLE_THRESHOLD:
+				# Obstacle ahead - turn towards more open side
 				if left_min > right_min:
-					self.explore_direction = self.yaw + math.pi / 4  # Turn left
+					self.explore_direction = self.yaw + math.pi / 3  # Turn left
 				else:
-					self.explore_direction = self.yaw - math.pi / 4  # Turn right
+					self.explore_direction = self.yaw - math.pi / 3  # Turn right
+				self.explore_timer = 0
+			elif self.explore_timer > 30:
+				# Been exploring same direction too long, pick new direction
+				# Spiral outward strategy
+				self.explore_direction = self.yaw + math.pi / 2
+				self.explore_timer = 0
+			elif self.explore_timer == 0:
+				# Just finished collecting, pick a new explore direction
+				# Try to explore in a systematic way
+				self.explore_direction = self.yaw + math.pi / 4
 			
-			# Drive towards explore direction
+			# Navigate towards exploration direction
 			angle_error = math.atan2(
 				math.sin(self.explore_direction - self.yaw),
 				math.cos(self.explore_direction - self.yaw)
 			)
-			cmd.linear.x = 0.4
-			cmd.angular.z = 1.0 * angle_error
+			
+			# Faster exploration
+			cmd.linear.x = 0.5
+			cmd.angular.z = 1.2 * angle_error
 		
 		self.cmd_pub.publish(cmd)
 
