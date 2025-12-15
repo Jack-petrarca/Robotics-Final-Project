@@ -223,7 +223,7 @@ class Project(Node):
 		cmd = Twist()
 #Escape timer helps to get the robot away from the current pillar if it is too close
 		if self.escape_timer > 0.0:
-			cmd.linear.x = -0.1
+			cmd.linear.x = -0.2
 			cmd.angular.z = 0.6
 			self.escape_timer -= 0.1
 			self.cmd_pub.publish(cmd)
@@ -235,13 +235,13 @@ class Project(Node):
 			dist = math.hypot(dx,dy) #used to determine when to stop by calculating how far away the robot is from the pillar
 			angle = math.atan2(dy,dx) #gives robot heading in world cords
 			err = math.atan2(math.sin(angle - self.yaw), math.cos(angle - self.yaw))
-			if dist < 0.49: # determiens how close to stop next to the pillar
+			if dist < 0.5: # determiens how close to stop next to the pillar
 				self.visited.append((self.tx, self.ty)) #if we were close enough mark pillar as visited
 				self.target_index += 1 #pick next target
 				self.have_target = False #make sure I set have target to false so I know I can move on to the next pillar
 				self.escape_timer = 1.0 # gets the robot away from the current pillar 
 				return
-		cmd.linear.x = 0.3 #robot speed
+		cmd.linear.x = 0.5 #robot speed
 		cmd.angular.z = 1.5 * err
 		#else:
 			#cmd.angular.z = 0.6
