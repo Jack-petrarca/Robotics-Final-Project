@@ -113,14 +113,14 @@ class Project(Node):
 		self.yaw = 0.0 
 		self.omega = 0.0
 
-    self.known_pillars = []    #Creates an empty array where pillars will be added once found
-    self.visited = []          #keeps track of known pillars so we dont revisit them
-    self.target_index = 0      #indexes through the known pillar array
-    self.have_target = False   
-    self.tx = 0.0              #target x and y in world frame
-    self.ty = 0.0
+		self.known_pillars = []    #Creates an empty array where pillars will be added once found
+		self.visited = []          #keeps track of known pillars so we dont revisit them
+		self.target_index = 0      #indexes through the known pillar array
+		self.have_target = False   
+		self.tx = 0.0              #target x and y in world frame
+		self.ty = 0.0
 
-    self.espcae_timer = 0.0   #helps to clear current pillar before moving on
+		self.escape_timer = 0.0   #helps to clear current pillar before moving on
 		
 		self.starttime = 0.0
 		self.elapsed = 0.0
@@ -144,36 +144,36 @@ class Project(Node):
 		self.elapsed = msg.header.stamp.sec - self.starttime
 		print("elapsed", self.elapsed)
 
-  def detect_pillars(self,msg): #THIS FUNCTION ONLY PROVIDES WHAT THE ROBOT THINKS COULD BE AN OBJECT
-    pillars = []    #stores detected pillars
-    cluster = []    #This stores groups of Lidar scans to detemine if an object is present
-    threshold = 0.15 #this determines the maximum distance the lidar scans must be apart from each other to be considered two different objects
+	def detect_pillars(self,msg): #THIS FUNCTION ONLY PROVIDES WHAT THE ROBOT THINKS COULD BE AN OBJECT
+		pillars = [] #stores detected pillars
+		cluster = [] #This stores groups of Lidar scans to detemine if an object is present
+		threshold = 0.15 #this determines the maximum distance the lidar scans must be apart from each other to be considered two different objects
 
-    for i, r in enumerate(msg.ranges):   #i is the index of the laser ray and r is the distance measurement
-      if r < msg.range_max:              # if laser maxed out range then it saw nothing and the entire length of the ray is free
-        if not cluster:                  #if we are not building a cluster start a cluster (cluster of rays)
-          cluster = [(i,r)]
-        elif abs(r - cluster[-1][1]) < threshold: # compare current ray to previous ray's distance  if the distance is small both rays most likly hit the same object (threshold defines the min distance between rays for it to be considered the same object)
-          cluster.append((i,r))     # add to cluster if both rays hit the same object
-        else:
-          if len(cluster) >= 2:    #defines min about of rays in a cluster to be considered an object in this case its 2 or more rays
-            pillars.append(cluster)
-          cluster = [(i,r)]
-      else:
-        if len(cluster) >= 2: #an object jsut ended save if it is large enough and reset the cluster count.
-          pillars.append(cluster)
-        cluster = []
-    return pillars
+		for i, r in enumerate(msg.ranges): #i is the index of the laser ray and r is the distance measurement
+			if r < msg.range_max: # if laser maxed out range then it saw nothing and the entire length of the ray is free
+				if not cluster: #if we are not building a cluster start a cluster (cluster of rays)
+					cluster = [(i,r)]
+				elif abs(r - cluster[-1][1]) < threshold: # compare current ray to previous ray's distance  if the distance is small both rays most likly hit the same object (threshold defines the min distance between rays for it to be considered the same object)
+					cluster.append((i,r)) # add to cluster if both rays hit the same object
+				else:
+					if len(cluster) >= 2: #defines min about of rays in a cluster to be considered an object in this case its 2 or more rays
+						pillars.append(cluster)
+					cluster = [(i,r)]
+			else:
+				if len(cluster) >= 2: #an object jsut ended save if it is large enough and reset the cluster count.
+					pillars.append(cluster)
+				cluster = []
+		return pillars
 
-  def cluster_to_world(self, cluster, msg): #computes pillars from robot frame to world frame to provide a stable x y for the robot to target
-    i_mean = int(np.mean([i for i, r in cluster]))   #takes the average ray index to aproximate center of the pillars
-    r_mean = np.mean([r for i, r in cluster])        #takes the average ray distance to aproximate center of the pillars
-    theta = msg.angle_min + i_mean * msg.angle_increment #converts ray index to degrees in radians since the laser scanner outputs angle min and angle increments
-    xr = r_mean * math.cos(theta)    #converts polar cordinates to cartesian but this is sstill in robot fram
-    yr = r_mean * math.sin(theta)
-    xw = self.x + xr * math.cos(self.yaw_) - yr * math.sin(self.yaw)  #converts robot x and y to world x and y
-    yw = self.y + xr * math.sin(self.yaw_) + yr * math.cos(self.yaw)
-    return xw, yw  # now we return the final positions of the pillars in the world
+	def cluster_to_world(self, cluster, msg): #computes pillars from robot frame to world frame to provide a stable x y for the robot to target
+		i_mean = int(np.mean([i for i, r in cluster])) #takes the average ray index to aproximate center of the pillars
+		r_mean = np.mean([r for i, r in cluster]) #takes the average ray distance to aproximate center of the pillars
+		theta = msg.angle_min + i_mean * msg.angle_increment #converts ray index to degrees in radians since the laser scanner outputs angle min and angle increments
+		xr = r_mean * math.cos(theta) #converts polar cordinates to cartesian but this is sstill in robot fram
+		yr = r_mean * math.sin(theta)
+		xw = self.x + xr * math.cos(self.yaw) - yr * math.sin(self.yaw) #converts robot x and y to world x and y
+		yw = self.y + xr * math.sin(self.yaw) + yr * math.cos(self.yaw)
+		return xw, yw #now we return the final positions of the pillars in the world
   
           
 		
@@ -207,48 +207,45 @@ class Project(Node):
 		if self.elapsed == 90:
 			cv2.imwrite("mymap.png", self.map.map)
 #Starts pillar detection			
-	  pillars = self.detect_pillars(msg)   #pillars are still a list of ray clusters from the robot sensors
-    for cluster in pillars:              #loop over each cluster 
-      xw, yw = self.cluster_to_world(cluster, msg)   #converts cluster to world cords
-      if all(math.hypot(xw - px, yw - py) > 0.8 for px in self.known_pillars):  #loops over all previous known pillars to determine if this pillar is new, it does it by determining the distance from known pillars to see if it is far enough away to be a new pillar
-        self.known_pillars.append((xw, yw)) #becomes a permanant object to the robot "stores pillar location"
-        #print(f"Detected pillar at {xw:.2f}, {yw:.2f}")   #used for debugging to see if there even was a pillar at a specific cord
+		pillars = self.detect_pillars(msg) #pillars are still a list of ray clusters from the robot sensors
+		for cluster in pillars: #loop over each cluster 
+			xw, yw = self.cluster_to_world(cluster, msg) #converts cluster to world cords
+			if all(math.hypot(xw - px, yw - py) > 0.8 for px, py in self.known_pillars): #loops over all previous known pillars to determine if this pillar is new, it does it by determining the distance from known pillars to see if it is far enough away to be a new pillar
+				self.known_pillars.append((xw, yw)) #becomes a permanant object to the robot "stores pillar location"
+        #print(f"Detected pillar at {xw:.2f}, {yw:.2f}") #used for debugging to see if there even was a pillar at a specific cord
 
-      if not self.have_target and self.target_index < len(self.known_pillars):  #if we are not moving to a pillar and there exists a know pillar pick the next pillar in the list and move there
-        self.tx, self.ty = self.known_pillars[self.target_index]
-        self.have_target = True
+		if not self.have_target and self.target_index < len(self.known_pillars): #if we are not moving to a pillar and there exists a know pillar pick the next pillar in the list and move there
+			self.tx, self.ty = self.known_pillars[self.target_index]
+			self.have_target = True
 			
-  		self.map.show_map()
+		self.map.show_map()
   
-      cmd = Twist()
+		cmd = Twist()
 #Escape timer helps to get the robot away from the current pillar if it is too close
-      if self.escape_timer > 0.0
-        cmd.linear.x = -0.1
-        cmd.anglular.z = 0.6
-        self.escape_timer -= 0.1
-        self.cmd_pub.publish(cmd)
-        return
+		if self.escape_timer > 0.0:
+			cmd.linear.x = -0.1
+			cmd.angular.z = 0.6
+			self.escape_timer -= 0.1
+			self.cmd_pub.publish(cmd)
+			return
 # go to the pillar
-      if self.have_target: #checks if we are driving to a pillar aka has a target
-        dx = self.tx - self.x  #gives robot the corse to take
-        dy = self.ty - self.y
-        dist = math.hypot(dx,dy)   #used to determine when to stop by calculating how far away the robot is from the pillar
-        angle = math.atan2(dy,dx)   #gives robot heading in world cords
-        err = math.atan2(math.sin(angle - self.yaw), math.cos(angle - self.yaw)) 
-
-        if dist < 0.49:   # determiens how close to stop next to the pillar
-          self.visited.append((self.tx, self.ty))  #if we were close enough mark pillar as visited
-          self.target_index += 1 #pick next target
-          self.have_target = False #make sure I set have target to false so I know I can move on to the next pillar
-          self.escape_timer = 1.0 # gets the robot away from the current pillar 
-          return
-
-        cmd.linear.x = 0.3   #robot speed
-        cmd.angular.z = 1.5 * err
-
-      else:
-        cmd.angular.z = 0.6
-      self.cmd_pub_publish(cmd)
+		if self.have_target: #checks if we are driving to a pillar aka has a target
+			dx = self.tx - self.x #gives robot the corse to take
+			dy = self.ty - self.y
+			dist = math.hypot(dx,dy) #used to determine when to stop by calculating how far away the robot is from the pillar
+			angle = math.atan2(dy,dx) #gives robot heading in world cords
+			err = math.atan2(math.sin(angle - self.yaw), math.cos(angle - self.yaw))
+			if dist < 0.49: # determiens how close to stop next to the pillar
+				self.visited.append((self.tx, self.ty)) #if we were close enough mark pillar as visited
+				self.target_index += 1 #pick next target
+				self.have_target = False #make sure I set have target to false so I know I can move on to the next pillar
+				self.escape_timer = 1.0 # gets the robot away from the current pillar 
+				return
+		cmd.linear.x = 0.3 #robot speed
+		cmd.angular.z = 1.5 * err
+		#else:
+			#cmd.angular.z = 0.6
+		self.cmd_pub.publish(cmd)
 
 
 def main(args=None):
