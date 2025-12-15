@@ -235,7 +235,7 @@ class Project(Node):
 			dist = math.hypot(dx,dy) #used to determine when to stop by calculating how far away the robot is from the pillar
 			angle = math.atan2(dy,dx) #gives robot heading in world cords
 			err = math.atan2(math.sin(angle - self.yaw), math.cos(angle - self.yaw))
-			if dist < 0.5: # determiens how close to stop next to the pillar
+			if dist < 0.55: # determiens how close to stop next to the pillar
 				self.visited.append((self.tx, self.ty)) #if we were close enough mark pillar as visited
 				self.target_index += 1 #pick next target
 				self.have_target = False #make sure I set have target to false so I know I can move on to the next pillar
